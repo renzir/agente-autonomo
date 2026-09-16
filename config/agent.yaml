@@ -1,0 +1,17 @@
+agent:
+  max_iterations: 12
+  max_tool_calls: 30
+  max_execution_time: 300      # segundos por ejecución
+
+context:
+  hard_limit: 32768           # Límite estricto basado en el modelo con menor contexto (32K)
+  target_input: 14000         # Objetivo de tokens de entrada para optimizar latencia
+  warning: 18000              # Alerta al acercarse al límite del target
+  compression: 20000          # Trigger para aplicar compresión de contexto
+  emergency_limit: 24000      # Límite de emergencia antes de forzar limpieza agresiva
+
+safety:
+  sandbox_enabled: true
+  allowed_dirs: ["."]          # directorios permitidos para filesystem y shell
+  command_timeout: 30
+  red_network_by_default: true

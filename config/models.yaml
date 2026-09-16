@@ -1,0 +1,12 @@
+models:
+  primary: qwen3.6:latest      # agente general / conversación principal
+  coding: qwen3.6:latest # tareas de programación
+  fast: gemma4-122k:latest         # tareas simples, baja latencia
+  research: ornith15-iq4xs:latest   # investigación (fase posterior)
+
+defaults:
+  model: primary
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 2048
+  keep_alive_seconds: 1800
