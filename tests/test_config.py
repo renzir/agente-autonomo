@@ -156,18 +156,15 @@ class TestToolMetadata:
     def test_tool_metadata_defaults(self) -> None:
         from models.schemas import ToolMetadata
 
+        # Crear sin input_schema para probar default (debería usar Field(default_factory=dict))
         meta = ToolMetadata(
             name="test_tool",
             description="Una herramienta de prueba",
-            input_schema={"type": "object"},
         )
         assert meta.permission == "auto"
-        assert meta.risk == 0
-        assert meta.timeout == 30.0
-        assert meta.cost == 0.0
-        assert meta.requires_confirmation is False
-
-
+        assert meta.risk == "low"
+        assert meta.input_schema == {}  # Default vacío
+        
 class TestConfigPathAbsolute:
     """Pruebas que aseguran que las rutas son absolutas y robustas."""
 

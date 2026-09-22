@@ -35,11 +35,15 @@ class OllamaClient:
         self,
         base_url: str | None = None,
         timeout: float = 60.0,
+        model_name: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> None:
         self._resolved_url: str = OllamaClient.resolve_endpoint(base_url)
         self.timeout = timeout
+        self.model_name = model_name  # Almacena el nombre del modelo
+        self.max_tokens = max_tokens   # Almacena los tokens máximos
         self._client: Optional[httpx.AsyncClient] = None
-    
+
     # ------------------------------------------------------------------ public helpers
     @staticmethod
     def resolve_endpoint(url_override: str | None) -> str:
@@ -81,7 +85,7 @@ class OllamaClient:
         """Envía un chat con la API /api/chat de Ollama."""
         client = await self._get_client()
         payload: dict[str, Any] = {
-            "model": model or "",
+            "model": model or self.model_name or "",
             "messages": messages,
         }
         payload.update(params)

@@ -45,9 +45,9 @@ class ToolMetadata(BaseModel):
     """
     name: str
     description: str
-    input_schema: dict[str, Any]
+    input_schema: dict[str, Any] = Field(default_factory=dict)
     permission: str = "auto"  # auto, confirmed, denied
-    risk: int = Field(default=0, ge=0, le=10)  # nivel de riesgo 0-10
+    risk: str = "low"  # 'low', 'medium', 'high'
     timeout: float = 30.0  # segundos máximos de ejecución
     cost: float = 0.0  # costo estimado en tokens
     requires_confirmation: bool = False
