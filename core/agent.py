@@ -110,16 +110,20 @@ class LocalAgent:
         available_tools = self._get_tool_metadata()
         self.router = Router(tool_registry=available_tools)
         
-        # Inicializar métricas logger inyectado (§12)
-        self.metrics_logger = MetricsLogger()
-        
-        # Construir orchestrator con dependencias inyectadas (§12)
-        # Usa core/planner, core/router
+        # ✅ CAMBIO CRÍTICO §14: Importar y usar el MetricsLogger REAL de metrics/logger.py
+        try:
+            from metrics.logger import MetricsLogger as RealMetricsLogger
+            self.metrics_logger = RealMetricsLogger(path="metrics/run.jsonl")
+        except ImportError:
+            logger.warning("No se pudo importar MetricsLogger, usando stub.")
+            
+        # Construir orchestrator con dependencias inyectadas (§12) + métricas (§14 wiring)
         self.orchestrator = Orchestrator(
             llm_client=self.ollama_client,
             planner=self.planner,
             router=self.router,
-            config=self.config
+            config=self.config,
+            metrics_logger=self.metrics_logger  # ← INYECCIÓN CRÍTICA DE MÉTRICAS (§14)
         )
         
         # Estado actual de sesión (se crea por run)

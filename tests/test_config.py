@@ -161,7 +161,7 @@ class TestToolMetadata:
             name="test_tool",
             description="Una herramienta de prueba",
         )
-        assert meta.permission == "auto"
+        assert meta.permission == "read"
         assert meta.risk == "low"
         assert meta.input_schema == {}  # Default vacío
         

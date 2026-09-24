@@ -17,8 +17,8 @@ except ImportError:
         name: str
         description: str
         input_schema: Dict[str, Any] = Field(default_factory=dict)
-        permission: str = "default"  # read, write, execute, admin
-        risk: str = "low"  # low, medium, high, critical
+        permission: str = "read"  # CORREGIDO §9,§17: read/write/execute/admin (no default)
+        risk: str = "low"  # CORREGIDO §9,§17: low/medium/high/critical
         timeout: int = 30
         cost: float = 0.0
 
@@ -128,30 +128,48 @@ class Router:
             }
         
         # Seleccionar la herramienta con mayor score
-        if not scores:
-            # Si no hay match por keywords, usar prioridad
-            for tool_name in self.priority_order:
-                if tool_name in available_tools:
-                    return RouterDecision(
-                        tool_name=tool_name,
-                        confidence=0.3,
-                        reason="Selección por prioridad (sin keywords coincidentes)"
-                    )
-        
-        best_tool = max(scores.items(), key=lambda x: x[1]['score'])
-        tool_name = best_tool[0]
-        score = best_tool[1]['score']
-        
-        # Normalizar confianza basado en el score
-        confidence = min(1.0, score / 2.0)  # Escala normalizada
-        
-        matched_keywords = best_tool[1]['matched_keywords']
-        reason = f"Keywords coincidentes: {', '.join(matched_keywords)}" if matched_keywords else "Selección por análisis semántico"
-        
+        if scores:
+            best_tool = max(scores.items(), key=lambda x: x[1]['score'])
+            tool_name = best_tool[0]
+            score = best_tool[1]['score']
+            
+            # Normalizar confianza basado en el score
+            confidence = min(1.0, score / 2.0)  # Escala normalizada
+            
+            matched_keywords = best_tool[1]['matched_keywords']
+            reason = f"Keywords coincidentes: {', '.join(matched_keywords)}" if matched_keywords else "Selección por análisis semántico"
+            
+            return RouterDecision(
+                tool_name=tool_name,
+                confidence=confidence,
+                reason=reason
+            )
+
+        # Si no hubo keywords coincidentes (scores vacío), intentar por prioridad
+        for tool_name in self.priority_order:
+            if tool_name in available_tools:
+                return RouterDecision(
+                    tool_name=tool_name,
+                    confidence=0.3,
+                    reason="Selección por prioridad (sin keywords coincidentes)"
+                )
+
+        # FALLBACK CRÍTICO: Si no hay match de keywords Y no hay herramientas en priority_order disponibles
+        # Esto evita el ValueError al intentar iterar sobre diccionarios vacíos o listas sin elementos
+        if available_tools:
+            # Si hay alguna herramienta disponible pero no está en la lista de prioridad, usar la primera disponible
+            fallback_tool = next(iter(available_tools.keys()))
+            return RouterDecision(
+                tool_name=fallback_tool,
+                confidence=0.1,
+                reason="Selección por defecto (no hay herramientas priorizadas disponibles)"
+            )
+
+        # Si no hay absolutamente ninguna herramienta
         return RouterDecision(
-            tool_name=tool_name,
-            confidence=confidence,
-            reason=reason
+            tool_name="",
+            confidence=0.0,
+            reason="No hay herramientas disponibles para enrutamiento"
         )
     
     def update_registry(self, tools: Dict[str, ToolMetadata]):

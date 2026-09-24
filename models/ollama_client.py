@@ -80,14 +80,23 @@ class OllamaClient:
         self,
         messages: list[dict[str, str]],
         model: Optional[str] = None,
+        tools: Optional[list[dict[str, Any]]] = None,  # CORREGIDO §Tool calling: tools como parámetro explícito
         **params: Any,
     ) -> dict[str, Any]:
-        """Envía un chat con la API /api/chat de Ollama."""
+        """Envía un chat con la API /api/chat de Ollama.
+        
+        CORREGIDO §Tool calling: Accepta y envía 'tools' en el payload según spec oficial.
+        """
         client = await self._get_client()
         payload: dict[str, Any] = {
             "model": model or self.model_name or "",
             "messages": messages,
         }
+        
+        # CORREGIDO §Tool calling: Incluir tools en el payload si se proporcionan
+        if tools:
+            payload["tools"] = tools
+        
         payload.update(params)
 
         response = await client.post("/api/chat", json=payload)
@@ -101,16 +110,47 @@ class OllamaClient:
         response.raise_for_status()
         return response.json()
 
-    async def tools(self) -> list[dict[str, Any]]:
-        """Consulta las herramientas disponibles en Ollama (si soportadas)."""
-        client = await self._get_client()
-        try:
-            resp = await client.post("/api/tools", json={})
-            return resp.json().get("tools", [])
-        except Exception as e:  # noqa: BLE001
-            print(f"Error al obtener herramientas: {e}")
+    # CORREGIDO §Tool calling: Extraer tool_calls de la respuesta oficial de Ollama
+    @staticmethod
+    def extract_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
+        """Extrae tool_calls de la respuesta de Ollama.
+        
+        CORREGIDO §Tool calling: Maneja tanto respuestas con como sin tool_calls.
+        La API oficial retorna: {"message": {"content": "...", "tool_calls": [...]}}
+        
+        Returns:
+            Lista de tool_calls (vacía si no hay)
+        """
+        message = response.get("message", {})
+        tool_calls = message.get("tool_calls", [])
+        
+        # Si no hay tool_calls, devolver lista vacía (no romper)
+        if not tool_calls:
             return []
-
+        
+        return tool_calls
+        # CORREGIDO §11: Exponer token counts reales del response de Ollama
+    @staticmethod
+    def get_token_counts(response: dict[str, Any]) -> tuple[int, int]:
+        """Obtiene prompt_eval_count y eval_count reales de la respuesta.
+        
+        CORREGIDO §11: Usa conteos reales en vez de estimaciones.
+        
+        Returns:
+            Tuple (prompt_tokens, completion_tokens) - (0, 0) si no disponibles
+        """
+        prompt_tokens = response.get("prompt_eval_count", 0)
+        completion_tokens = response.get("eval_count", 0)
+        
+        # Fallback por si viene como string
+        try:
+            prompt_tokens = int(prompt_tokens) if prompt_tokens else 0
+            completion_tokens = int(completion_tokens) if completion_tokens else 0
+        except (ValueError, TypeError):
+            prompt_tokens = 0
+            completion_tokens = 0
+        
+        return (prompt_tokens, completion_tokens)
 
 # ------------------------------------------------------------------ instancia global por conveniencia
 DEFAULT_CLIENT: Optional[OllamaClient] = None

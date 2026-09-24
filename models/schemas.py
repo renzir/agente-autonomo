@@ -46,7 +46,7 @@ class ToolMetadata(BaseModel):
     name: str
     description: str
     input_schema: dict[str, Any] = Field(default_factory=dict)
-    permission: str = "auto"  # auto, confirmed, denied
+    permission: str = "read"  # read, write, execute, admin
     risk: str = "low"  # 'low', 'medium', 'high'
     timeout: float = 30.0  # segundos máximos de ejecución
     cost: float = 0.0  # costo estimado en tokens
