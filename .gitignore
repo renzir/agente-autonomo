@@ -42,3 +42,5 @@ dmypy.json
 .env.*.local
 
 AGENT_SPEC_V2.md
+ollama_endpoint.yaml
+main.py

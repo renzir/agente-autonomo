@@ -1,6 +1,7 @@
 [tool.pytest.ini_options]
 addopts = "-v"
 pythonpath = ["."]
+asyncio_mode = "auto"
 
 [tool.mypy]
 mypy_path = "."

@@ -242,7 +242,7 @@ class TestEdgeCases:
 class TestMetricsPropagation:
     """Tests para verificar que las métricas se propagan correctamente."""
     
-    def test_metrics_logged_during_run(self):
+    async def test_metrics_logged_during_run(self):
         """Verificar que las métricas se loguean al ejecutar run()."""
         with patch('core.agent.OllamaClient'), \
              patch('core.agent.ModelRegistry'):
@@ -254,7 +254,7 @@ class TestMetricsPropagation:
 
             # Spy para verificar que logger_callback fue pasado al orchestrator
             captured_callbacks = []
-            original_run = agent.orchestrator.run
+            original_run =  agent.orchestrator.run
             
             def track_callback(*args, **kwargs):
                 if 'logger_callback' in kwargs:
@@ -263,7 +263,7 @@ class TestMetricsPropagation:
                 return mock_response
 
             with patch.object(agent.orchestrator, 'run', side_effect=track_callback):
-                agent.run("Prueba métricas")
+                await agent.run("Prueba métricas")
             
             # Verificar que logger_callback fue pasado (el orchestrator intenta loguear con él)
             assert len(captured_callbacks) == 1

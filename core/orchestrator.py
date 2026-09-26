@@ -67,9 +67,10 @@ class Orchestrator:
         self.metrics = OrchestrationMetrics()
         self.start_time = None
     
-    def run(self, task: str, state: SessionState, 
+    async def run(self, task: str, state: SessionState, 
             tools_map: Dict[str, Callable], 
-            logger_callback=None) -> Message:
+            logger_callback=None,
+            stream_callback: Optional[Callable[[str, bool], None]] = None) -> Message:  # AGREGA ESTE PARÁMETRO
         """
         Ejecuta el ciclo completo del agente.
         
@@ -78,7 +79,7 @@ class Orchestrator:
             state: Estado actual de la sesión
             tools_map: Diccionario {tool_name: function}
             logger_callback: Callback opcional para logs adicionales
-            
+            stream_callback: Callback opcional para streaming de respuestas
         Returns:
             Message con la respuesta final
         """
@@ -115,7 +116,7 @@ class Orchestrator:
             
             # 1. UNDERSTAND
             state.set_phase('understand')
-            intention = self._understand(state)
+            intention = await self._understand(state, stream_callback=stream_callback)
             
 
             # 2. PLAN (§14)
@@ -257,7 +258,7 @@ class Orchestrator:
             self.metrics.tool_calls_count += len(plan_result.steps)
             
             if not should_continue:
-                response = self._generate_response(state)
+                response = await self._generate_response(state)
                 break
         
         # ✅ CAMBIO CRÍTICO §14: Registrar métricas finales del loop completo (latency, iterations)
@@ -283,7 +284,7 @@ class Orchestrator:
         # generamos una respuesta de fallback para evitar NoneType errors en tests o consumers.
         if response is None:
             self.logger.warning("Límite de iteraciones alcanzado sin finalizar la tarea exitosamente.")
-            response = self._generate_response(state)
+            response = await self._generate_response(state, stream_callback=stream_callback)
 
         return response 
     
@@ -291,10 +292,62 @@ class Orchestrator:
     # Métodos auxiliares del agente loop (§12, §13)
     # ====================================================================
     
-    def _understand(self, state: SessionState) -> str:
-        """UNDERSTAND: Interpreta la intención del usuario."""
-        # TODO: Implementar con LLM en el siguiente sprint
-        return "Generic intent for now"  # Stub
+    async def _understand(self, state: SessionState, stream_callback: Optional[Callable[[str, bool], None]] = None) -> str:
+        """UNDERSTAND: Interpreta la intención del usuario. Soporta streaming."""
+        if not self.llm_client:
+            return "Generic intent for now"
+
+        system_prompt = (
+            "Eres un analizador de intenciones para un agente autónomo. "
+            "Tu tarea es extraer una descripción concisa y clara de la intención del usuario "
+            "a partir de su mensaje. Devuelve SOLO la descripción de la intención, sin explicaciones adicionales."
+        )
+
+        last_user_msg = None
+        for msg in reversed(state.messages):
+            if msg.role == 'user':
+                last_user_msg = msg.content
+                break
+
+        if not last_user_msg:
+            return "No user input found"
+
+        try:
+            if stream_callback:
+                full_intent = ""
+                async for chunk, is_final in self.llm_client.chat(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Mensaje del usuario: {last_user_msg}"}
+                    ],
+                    temperature=0.1,
+                    max_tokens=256,
+                    stream=True
+                ):
+                    full_intent += chunk
+                    stream_callback(chunk, is_final)
+
+                return full_intent.strip() if full_intent else "Generic intent for now"
+
+            response = await self.llm_client.chat(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Mensaje del usuario: {last_user_msg}"}
+                ],
+                temperature=0.1,
+                max_tokens=256
+            )
+
+            if isinstance(response, dict):
+                content = response.get("message", {}).get("content", "") or response.get("content", "")
+            else:
+                content = str(response)
+
+            return content.strip() if content else "Generic intent for now"
+
+        except Exception as e:
+            self.logger.error(f"Error al interpretar intención del usuario: {str(e)}")
+            return "Generic intent for now"
     
     def _observe_result(self, result: Any) -> Dict[str, Any]:
         """OBSERVE: Observa y normaliza el resultado de una herramienta (§12)."""
@@ -325,10 +378,77 @@ class Orchestrator:
         
         return True
     
-    def _generate_response(self, state: SessionState) -> Message:
-        """Genera la respuesta final al usuario."""
-        # TODO: Implementar con LLM en el siguiente sprint
-        final_content = "Tarea completada (stub). Iteraciones: {}".format(
-            self.metrics.iterations_count
+    async def _generate_response(self, state: SessionState, stream_callback: Optional[Callable[[str, bool], None]] = None) -> Message:
+        """Genera la respuesta final al usuario usando el LLM cuando está disponible.
+        
+        Si se proporciona stream_callback, utiliza streaming para enviar los chunks de texto.
+        De lo contrario, usa el comportamiento estándar (no streaming).
+        """
+        if not (self.llm_client and state.current_task):
+            return Message(
+                role="assistant",
+                content=f"Tarea completada (stub). Iteraciones: {self.metrics.iterations_count}"
+            )
+
+        # Construir contexto con los resultados de las herramientas ejecutadas
+        tool_results = []
+        results_cache = getattr(state, 'results_cache', {})
+        for step_id, result in (results_cache or {}).items():
+            tool_results.append(f"Paso {step_id}: {result}")
+
+        results_context = "\n".join(tool_results) if tool_results else "Sin resultados previos."
+
+        system_prompt = (
+            "Eres un asistente que genera respuestas finales claras y útiles para el usuario. "
+            "Basándote en los resultados de las herramientas ejecutadas, proporciona una respuesta "
+            "concisa y amigable confirmando la tarea completada o explicando lo sucedido."
         )
-        return Message(role="assistant", content=final_content)
+
+        user_prompt = f"La tarea era: {state.current_task}\nResultados de herramientas:\n{results_context}"
+
+        try:
+            # Camino con streaming si hay callback disponible
+            if stream_callback:
+                full_content = ""
+                async for chunk, is_final in self.llm_client.chat(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=512,
+                    stream=True
+                ):
+                    full_content += chunk
+                    if stream_callback:
+                        stream_callback(chunk, is_final)
+
+                return Message(
+                    role="assistant", 
+                    content=full_content.strip() if full_content else "Tarea completada."
+                )
+
+            # Camino estándar (no streaming) para compatibilidad hacia atrás
+            response = await self.llm_client.chat(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=512
+            )
+
+            if isinstance(response, dict):
+                content = response.get("message", {}).get("content", "") or response.get("content", "")
+            else:
+                content = str(response)
+
+            return Message(role="assistant", content=content.strip() if content else "Tarea completada.")
+
+        except Exception as e:
+            self.logger.error(f"Error al generar respuesta final con LLM: {str(e)}")
+            # Fallback en caso de error incluso con streaming
+            return Message(
+                role="assistant",
+                content=f"Tarea completada (error). Iteraciones: {self.metrics.iterations_count}"
+            )

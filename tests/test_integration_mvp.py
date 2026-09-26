@@ -38,7 +38,7 @@ from core.orchestrator import Orchestrator
 class TestAgentLoopWithStubbedLLM:
     """Simula el flujo completo del agente sin servidor LLM real."""
 
-    def test_orchestrator_runs_understand_plan_execute_verify_reflect(self):
+    async def test_orchestrator_runs_understand_plan_execute_verify_reflect(self):
         """Verifica que el orchestrator recorre UNDERSTAND→PLAN→EXECUTE→VERIFY con un tool dummy."""
         
         # 1. Crear un tool dummy que siempre devuelve éxito
@@ -59,7 +59,7 @@ class TestAgentLoopWithStubbedLLM:
         
         # Mock de _reflect para que termine tras 1 iteración (evita loop infinito)
         with patch.object(orchestrator, '_reflect', return_value=False):
-            response = orchestrator.run("Dummy task", state, tools_map, logger_callback=mem_logger)
+            response = await orchestrator.run("Dummy task", state, tools_map, logger_callback=mem_logger)
 
         assert response is not None
         
@@ -70,7 +70,7 @@ class TestAgentLoopWithStubbedLLM:
         logged_metrics = mem_logger.metrics_history if hasattr(mem_logger, 'metrics_history') else []
         assert len(logged_metrics) > 0, "Expected metrics to be logged during orchestrator run."
 
-    def test_orchestrator_logs_latency_and_iterations(self):
+    async def test_orchestrator_logs_latency_and_iterations(self):
         """Verifica que el orchestrator registra latencia total y número de iteraciones."""
         
         mock_tool = MagicMock(return_value={"status": "success"})
@@ -85,7 +85,7 @@ class TestAgentLoopWithStubbedLLM:
         state = SessionState()
         
         with patch.object(orchestrator, '_reflect', return_value=False):
-            orchestrator.run("Task for latency test", state, tools_map)
+            await orchestrator.run("Task for latency test", state, tools_map)
 
         # Buscar métrica de orchestration_summary en los logs
         summary_found = False
@@ -172,7 +172,7 @@ class TestToolsMapIntegration:
 class TestLimits:
     """Verifica que se respetan los límites configurables."""
 
-    def test_respects_max_iterations(self):
+    async def test_respects_max_iterations(self):
         """El orchestrator detiene el loop al alcanzar max_iterations, no más allá."""
         
         mem_logger = SimpleMetricsLogger(path=None)
@@ -189,7 +189,7 @@ class TestLimits:
 
         # Forzar que _reflect siempre devuelva True para intentar seguir iterando más allá del límite configurado
         with patch.object(orchestrator, '_reflect', return_value=True):  
-            response = orchestrator.run("Task to test max_iterations", state, tools_map)
+            response = await orchestrator.run("Task to test max_iterations", state, tools_map)
 
         assert response is not None
         
@@ -199,7 +199,7 @@ class TestLimits:
         # Como cada iteración puede loggear múltiples entradas, verificamos que el orchestrator no se colgó y terminó.
         assert response is not None
 
-    def test_respects_max_tool_calls(self):
+    async def test_respects_max_tool_calls(self):
         """El orchestrator detiene la ejecución de herramientas al alcanzar max_tool_calls."""
         
         mem_logger = SimpleMetricsLogger(path=None)
@@ -221,7 +221,7 @@ class TestLimits:
         state = SessionState()
 
         with patch.object(orchestrator, '_reflect', return_value=False):  # Terminar tras primera iteración para controlar el flujo
-            response = orchestrator.run("Task to test max_tool_calls", state, tools_map)
+            response = await orchestrator.run("Task to test max_tool_calls", state, tools_map)
 
         assert call_count['count'] <= 3, f"Expected at most 3 tool calls; got {call_count['count']}."
 
@@ -304,7 +304,7 @@ class TestMetricsLoggerAndEvaluatorIntegration:
 class TestFullAgentLoopWithJSONLMetrics:
     """Simula el flujo COMPLETO del agente sin Ollama real, verificando todo integrado."""
 
-    def test_full_loop_end_to_end_with_jsonl_metrics(self):
+    async def test_full_loop_end_to_end_with_jsonl_metrics(self):
         """Ejecuta un loop completo con mock LLM → orchestrator → tools y confirma métricas JSONL válidas al final."""
         
         with tempfile.TemporaryDirectory() as temp_dir: 
@@ -374,7 +374,7 @@ class TestFullAgentLoopWithJSONLMetrics:
             
             # Mock de _reflect para que termine tras una iteración completa 
             with patch.object(orchestrator, '_reflect', return_value=False):
-                response = orchestrator.run("Full end-to-end task", state, tools_map)
+                response = await orchestrator.run("Full end-to-end task", state, tools_map)
 
         assert response is not None
         
@@ -414,7 +414,7 @@ class TestFullAgentLoopWithJSONLMetrics:
 class TestLimitsDeepDive:
     """Verifica límites estrictos de tool calls en loops potencialmente infinitos."""
 
-    def test_tool_calls_limit_infinite_recursion_stopped(self):
+    async def test_tool_calls_limit_infinite_recursion_stopped(self):
         """Crea un tool que siempre devuelve una respuesta exitosa pero el orchestrator debe detenerse por max_tool_calls."""
         
         mem_logger = SimpleMetricsLogger(path=None)
@@ -454,7 +454,7 @@ class TestLimitsDeepDive:
             # Forzar _reflect para que siempre quiera continuar (así el loop externo de 10 iteraciones intenta seguir)
             with patch.object(orchestrator, '_reflect', return_value=True): 
                 
-                response = orchestrator.run("Task to test infinite recursion stop", state, tools_map)
+                response = await orchestrator.run("Task to test infinite recursion stop", state, tools_map)
 
         assert call_tracker['count'] <= 2, f"Tool should not be called more than max_tool_calls (2). Was called {call_tracker['count']} times."
 
