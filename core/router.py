@@ -3,10 +3,42 @@ core/router.py - Enrutador de herramientas del agente
 Recibe la intención del usuario y decide qué herramienta usar.
 Basado en metadatos de herramientas del registry.
 """
-
+import re
 import logging
-from typing import Callable, Dict, List, Optional, Any
+from typing import Tuple, Callable, Dict, List, Optional, Any
 from pydantic import BaseModel, Field
+from models.schemas import InteractionMode
+
+# ... existing imports ...
+from models.schemas import InteractionMode
+
+class IntentClassifier:
+    """
+    Clasificador ligero de intención basado EXCLUSIVAMENTE en prefijos explícitos.
+    No usa heurísticas de palabras clave para evitar falsos positivos/negativos.
+    """
+    
+    @classmethod
+    def classify(cls, text: str) -> InteractionMode:
+        """
+        Clasifica el input del usuario según comandos explícitos.
+        
+        Reglas:
+        1. Si empieza con /chat -> Conversational.
+        2. Si empieza con /agente -> Autonomous.
+        3. Default -> Autonomous (mantiene compatibilidad y comportamiento actual).
+        """
+        text_lower = text.lower().strip()
+        
+        # Chequeo estricto de prefijos para robustez
+        if text_lower.startswith('/chat') or text_lower.startswith('/chat '):
+            return InteractionMode.CONVERSATIONAL
+            
+        if text_lower.startswith('/agente') or text_lower.startswith('/agente '):
+            return InteractionMode.AUTONOMOUS
+        
+        # Default por defecto (manteniendo la lógica anterior de fallback a complejo)
+        return InteractionMode.AUTONOMOUS
 
 # Importar modelos existentes para compatibilidad
 try:

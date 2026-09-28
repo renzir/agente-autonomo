@@ -45,7 +45,7 @@ class Planner:
         self.config = config or default_config
         self.max_iterations = self.config.get('agent', {}).get('max_iterations', 10)
 
-    def plan(self, task: str, context: Optional[str] = None) -> PlannerResponse:
+    async def plan(self, task: str, context: Optional[str] = None) -> PlannerResponse:
         """
         Planifica los pasos necesarios para completar una tarea.
         
@@ -64,44 +64,77 @@ class Planner:
             
         try:
             # Usar el cliente LLM para generar un plan
-            response = self._llm_plan(task, context)
+            response = await self._llm_plan(task, context)
             return response
         except Exception as e:
             self.logger.error(f"Error al planificar con LLM: {str(e)}")
             return self._default_planning(task)
 
-    def _llm_plan(self, task: str, context: Optional[str] = None) -> PlannerResponse:
-        """Genera un plan usando el cliente LLM."""
-        # Construir prompt para planificación
-        system_prompt = """Eres un planner de agentes. Tu trabajo es dividir una tarea en pasos pequeños y accionables.
-Debes considerar qué herramientas pueden ser necesarias y en qué orden ejecutarlas.
-Devuelve solo un JSON válido con la estructura: { "steps": [{ "id": número, "description": "string", "depends_on": [lista_de_ids], "tool": "nombre_herramienta", "args": {}, "expected_output": "string" }], "estimated_tokens": número, "max_iterations": número }
-"""
+    async def _llm_plan(self, task: str, context: Optional[str] = None) -> PlannerResponse:
+        """Genera un plan usando el cliente LLM. CORREGIDO PARA DEVOLVER JSON."""
         
-        user_prompt = f"Tarea a realizar: {task}\nContexto disponible: {context or 'Ninguno'}\nPor favor divide esta tarea en pasos lógicos y accionables."
-        
-        # Llamar al LLM
-        from models.schemas import PlannerRequest
-        request = PlannerRequest(
-            task=task,
-            context=context,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            temperature=0.2,  # Baja temperatura para planificación determinista
-            max_tokens=2048
+        # 1. Construir prompt EXPLICITO para forzar JSON
+        system_prompt = (
+            "Eres un planner de agentes. Tu ÚNICA tarea es devolver un objeto JSON válido. "
+            "NO incluyas explicaciones, texto preámbulo ni markdown. Solo el JSON.\n"
+            "La estructura debe ser exactamente:\n"
+            "{\n"
+            '  "steps": [\n'
+            '    {"id": 1, "description": "...", "depends_on": [], "tool": "", "args": {}, "expected_output": "..."}\n'
+            "  ],\n"
+            '  "estimated_tokens": 0,\n'
+            '  "max_iterations": 1\n'
+            "}\n"
+            "Si no puedes planificar, devuelve: {\"steps\": [], \"estimated_tokens\": 0, \"max_iterations\": 0}"
         )
         
-        response = self.llm_client.generate_completion(request)
-        
-        # Parsear la respuesta del LLM
-        try:
-            import json
-            plan_data = json.loads(response)
-            return PlannerResponse(**plan_data)
-        except Exception as e:
-            self.logger.error(f"Error al parsear respuesta del planner: {str(e)}")
-            return self._default_planning(task)
+        user_prompt = f"Tarea a realizar: {task}\nContexto disponible: {context or 'Ninguno'}"
 
+        # 2. Llamar al LLM ASINCRONAMENTE usando chat() (ya que generate_completion no existe)
+        try:
+            response_dict = await self.llm_client.chat(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1, # Temperatura muy baja para ser preciso con el JSON
+                max_tokens=1024
+            )
+            
+            # 3. Extraer el contenido de texto del response
+            if isinstance(response_dict, dict):
+                content = response_dict.get("message", {}).get("content", "") or response_dict.get("content", "")
+            else:
+                content = str(response_dict)
+
+            # 4. Limpiar posibles marcas de markdown (```json ... ```) que el LLM a veces añade
+            if content.startswith("```"):
+                lines = content.split("\n")
+                # Eliminar la primera línea (```json o ```) y la última (```)
+                if len(lines) > 1:
+                    lines.pop(0)
+                    if lines[-1].strip() == "}":
+                        lines.pop(-1)
+                    content = "\n".join(lines)
+            
+            # 5. Parsear JSON
+            import json
+            plan_data = json.loads(content)
+            
+            # Validar que tenga la estructura básica
+            if 'steps' not in plan_data:
+                raise ValueError("El JSON devuelto no tiene la clave 'steps'")
+
+            return PlannerResponse(**plan_data)
+            
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            self.logger.error(f"Error al parsear respuesta del planner (JSON inválido): {e} | Respuesta cruda: {content[:100]}")
+            # Fallback seguro en lugar de romper
+            return self._default_planning(task)
+        except Exception as e:
+            self.logger.error(f"Error crítico en _llm_plan: {str(e)}")
+            return self._default_planning(task)
+        
     def _default_planning(self, task: str) -> PlannerResponse:
         """Planificación por defecto para tareas simples."""
         # Para tareas muy simples, un solo paso es suficiente

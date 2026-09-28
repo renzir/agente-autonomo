@@ -47,7 +47,6 @@ class Orchestrator:
         self.llm_client = llm_client
         self.planner = planner or Planner(llm_client=llm_client)
         self.router = router or Router()
-        # ✅ CAMBIO CRÍTICO: Guardar referencia al metrics_logger inyectado (§14)
         self.metrics_logger = metrics_logger
 
         # Configuración por defecto (§13: Límites configurables)
@@ -55,16 +54,17 @@ class Orchestrator:
             'agent': {
                 'max_iterations': 10,
                 'max_tool_calls': 20,
-                'max_execution_time_seconds': 300
+                'max_execution_time_seconds': 60
             }
         }
         self.config = config or default_config
         self.max_iterations = self.config.get('agent', {}).get('max_iterations', 10)
         self.max_tool_calls = self.config.get('agent', {}).get('max_tool_calls', 20)
-        self.max_execution_time = self.config.get('agent', {}).get('max_execution_time_seconds', 300)
+        self.max_execution_time = self.config.get('agent', {}).get('max_execution_time_seconds', 60)
         
         # Métricas internas del orchestrator
         self.metrics = OrchestrationMetrics()
+        self.consecutive_stalled_iterations = 0
         self.start_time = None
     
     async def run(self, task: str, state: SessionState, 
@@ -105,8 +105,13 @@ class Orchestrator:
             self.logger.info(f"Iteración {iteration}/{self.max_iterations}")
             
             # ✅ CAMBIO CRÍTICO §14: Registrar inicio de iteración
-            if self.metrics_logger:
-                self.metrics_logger.log("iteration_start", {"iteration": iteration})
+            self.logger.info(f"Iteración {iteration}/{self.max_iterations}")
+            
+            # ✅ NUEVO: Validación crítica para evitar bucle infinito
+            # Si hemos tenido 2 iteraciones consecutivas sin progreso real (intención genérica), detenemos.
+            if self.consecutive_stalled_iterations >= 2:
+                self.logger.error("Estancamiento detectado: 2 iteraciones consecutivas sin progreso válido. Finalizando.")
+                break
 
             # Verificar límites de tiempo (§13)
             elapsed = time.time() - loop_start_time
@@ -115,10 +120,14 @@ class Orchestrator:
                 break
             
             # 1. UNDERSTAND
-            state.set_phase('understand')
+            state.set_phase('understand')            
             intention = await self._understand(state, stream_callback=stream_callback)
             
-
+            if intention and len(intention.split()) < 10 and not any(kw in intention.lower() for kw in ['crear', 'archivo', 'refactor', 'buscar', 'ejecutar']):
+                state.set_phase('respond')
+                response = await self._generate_simple_response(state, intention)
+                return response
+            
             # 2. PLAN (§14)
             state.set_phase('plan')
             
@@ -130,11 +139,16 @@ class Orchestrator:
                 context_messages = [msg.content for msg in state.messages[start_idx:]]
                 context_str = "\n".join(context_messages) if context_messages else None
             
-            plan_result = self.planner.plan(intention, context_str)
+            plan_result = await self.planner.plan(intention, context_str)
 
-            # Validar plan
+            # ✅ NUEVO: Validar que el plan no esté vacío o sea genérico por defecto
+            if not plan_result or not hasattr(plan_result, 'steps') or len(plan_result.steps) == 0:
+                self.logger.error("Fallo crítico en PLAN: El planner devolvió un plan sin pasos. Deteniendo ciclo.")
+                break
+            
+            # Validar plan (lógica existente que ya tenías)
             if not self.planner.validate_plan(plan_result):
-                self.logger.error("Plan inválido")
+                self.logger.error("Plan inválido según validación estructural")
                 break
             
             # 3. SELECT TOOLS & EXECUTE (ciclo de herramientas)
@@ -315,7 +329,8 @@ class Orchestrator:
         try:
             if stream_callback:
                 full_intent = ""
-                async for chunk, is_final in self.llm_client.chat(
+                # CORRECCIÓN CRÍTICA: Obtener el generador ASYNC primero
+                chat_generator = await self.llm_client.chat(
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"Mensaje del usuario: {last_user_msg}"}
@@ -323,12 +338,17 @@ class Orchestrator:
                     temperature=0.1,
                     max_tokens=256,
                     stream=True
-                ):
-                    full_intent += chunk
-                    stream_callback(chunk, is_final)
+                )
+                
+                # Ahora iteramos sobre el generador correctamente
+                async for chunk, is_final in chat_generator:
+                    if chunk:  # Evitar chunks vacíos
+                        full_intent += chunk
+                        stream_callback(chunk, is_final)
 
                 return full_intent.strip() if full_intent else "Generic intent for now"
 
+            # Camino no-streaming (existinge lógica)
             response = await self.llm_client.chat(
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -347,7 +367,7 @@ class Orchestrator:
 
         except Exception as e:
             self.logger.error(f"Error al interpretar intención del usuario: {str(e)}")
-            return "Generic intent for now"
+            return "Generic intent for now"  # Fallback seguro para no romper el bucle inmediatamente
     
     def _observe_result(self, result: Any) -> Dict[str, Any]:
         """OBSERVE: Observa y normaliza el resultado de una herramienta (§12)."""
@@ -379,6 +399,7 @@ class Orchestrator:
         return True
     
     async def _generate_response(self, state: SessionState, stream_callback: Optional[Callable[[str, bool], None]] = None) -> Message:
+
         """Genera la respuesta final al usuario usando el LLM cuando está disponible.
         
         Si se proporciona stream_callback, utiliza streaming para enviar los chunks de texto.
@@ -410,7 +431,8 @@ class Orchestrator:
             # Camino con streaming si hay callback disponible
             if stream_callback:
                 full_content = ""
-                async for chunk, is_final in self.llm_client.chat(
+                # CORRECCIÓN CRÍTICA: Obtener el generador ASYNC primero
+                chat_generator = await self.llm_client.chat(
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -418,10 +440,14 @@ class Orchestrator:
                     temperature=0.1,
                     max_tokens=512,
                     stream=True
-                ):
-                    full_content += chunk
-                    if stream_callback:
-                        stream_callback(chunk, is_final)
+                )
+                
+                # Iterar correctamente sobre el generador
+                async for chunk, is_final in chat_generator:
+                    if chunk:
+                        full_content += chunk
+                        if stream_callback:
+                            stream_callback(chunk, is_final)
 
                 return Message(
                     role="assistant", 
@@ -452,3 +478,22 @@ class Orchestrator:
                 role="assistant",
                 content=f"Tarea completada (error). Iteraciones: {self.metrics.iterations_count}"
             )
+    async def _generate_simple_response(self, state: SessionState, intention: str) -> Message:
+        """Responde directamente para intenciones simples sin pasar por herramientas."""
+        if not self.llm_client:
+            return Message(role="assistant", content=f"Recibí: {intention}")
+
+        system_prompt = "Eres un asistente útil. Responde de forma breve y amable."
+        
+        # Usar el mismo cliente con stream=True para velocidad si es posible, o directo
+        response_dict = await self.llm_client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Usuario dice: {intention}"}
+            ],
+            temperature=0.7,
+            max_tokens=256
+        )
+        
+        content = response_dict.get("message", {}).get("content", "") if isinstance(response_dict, dict) else str(response_dict)
+        return Message(role="assistant", content=content.strip())

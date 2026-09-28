@@ -26,8 +26,9 @@ except ImportError as e:
 # Core imports
 from core.state import SessionState, Message
 from core.planner import Planner
-from core.router import Router
+from core.router import Router, IntentClassifier 
 from core.orchestrator import Orchestrator
+from models.schemas import InteractionMode
 
 
 # Configuración de logging
@@ -222,14 +223,13 @@ class LocalAgent:
         
         return tools
     
-    def run(self, user_input: str) -> Message:
+    async def run(self, user_input: str) -> Message:
         """
         Punto de entrada principal del ciclo. Expone run(user_input) -> response.
         
-        Este método:
-        1. Crea un nuevo estado de sesión
-        2. Conecta todo a través del orchestrator
-        3. Devuelve la respuesta final
+        Este método decide automáticamente entre:
+        1. Modo Conversacional (/chat): Respuesta directa vía LLM sin Planner ni Router.
+        2. Modo Autónomo (/agente o default): Ejecución completa del Orchestrator.
         
         NO hardcodea nada; usa las capas inyectadas (orchestrator, router, planner).
         
@@ -241,24 +241,77 @@ class LocalAgent:
         """
         self.logger.info(f"Agente ejecutando: {user_input[:50]}...")
         
+        # 1. Detectar Modo de Interacción
+        mode = IntentClassifier.classify(user_input)
+        
+        # 2. Ruta Rápida: Modo Conversacional (/chat)
+        if mode == InteractionMode.CONVERSATIONAL:
+            return await self._handle_conversational_mode(user_input)
+
+        # 3. Ruta Compleja: Modo Autónomo (Predeterminado o /agente)
+        return await self._handle_autonomous_mode(user_input)
+
+    async def _handle_conversational_mode(self, user_input: str) -> Message:
+        """
+        Maneja interacciones rápidas sin Planner ni Router.
+        Usa el LLM directamente para respuestas contextuales.
+        """
+        state = self.state_factory()
+        state.add_message('user', user_input)
+        
+        # Prompt optimizado para conversación rápida (sin contexto de herramientas)
+        system_prompt = (
+            "Eres un asistente útil y conciso. Responde a las preguntas del usuario "
+            "directamente sin usar herramientas externas ni realizar planes complejos."
+        )
+
+        if self.ollama_client:
+            try:
+                # Llamada directa al LLM bypassando el Orchestrator
+                response = await self.ollama_client.chat(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_input}
+                    ],
+                    temperature=0.7,
+                    max_tokens=512
+                )
+                
+                if isinstance(response, dict):
+                    content = response.get("message", {}).get("content", "") or response.get("content", "")
+                else:
+                    content = str(response)
+                    
+                return Message(role="assistant", content=content.strip())
+            except Exception as e:
+                self.logger.error(f"Error en modo conversacional: {e}")
+                return Message(role="assistant", content="Lo siento, hubo un error procesando tu mensaje.")
+        else:
+            # Fallback si no hay LLM (raro, pero posible en tests unitarios)
+            return Message(role="assistant", content=f"(Modo Chat) He recibido tu mensaje: {user_input}")
+
+    async def _handle_autonomous_mode(self, user_input: str) -> Message:
+        """
+        Ejecuta el flujo completo actual: Planner -> Router -> Orchestrator.
+        Preserva toda la lógica existente de herramientas y seguridad.
+        """
         # Crear nuevo estado de sesión para esta ejecución
         state = self.state_factory()
         self.current_session = state
         
-        # Construir herramientas stub disponibles (puede ser reemplazado por tool_executor real)
+        # Construir herramientas stub disponibles (lógica original intacta)
         tools_map = self._get_tools_map()
         
         # Ejecutar ciclo completo vía orchestrator (§12)
-        response = self.orchestrator.run(
+        response = await self.orchestrator.run(
             task=user_input,
             state=state,
             tools_map=tools_map,
             logger_callback=self.metrics_logger  # Métricas inyectadas (§12)
         )
         
-        self.logger.info("Ciclo del agente completado")
         return response
-    
+
     def _get_tools_map(self) -> Dict[str, Callable]:
         """
         Construye el mapa de herramientas para el orchestrator.
@@ -328,8 +381,7 @@ class LocalAgent:
         self.current_session = None
         self.metrics_logger.metrics_history.clear()
         self.logger.info("Sesión reiniciada")
-
-
+        
 # API pública simplificada
 def create_agent(config_path: str = "config/agent.yaml", model_name: str = "qwen3.6:latest") -> LocalAgent:
     """

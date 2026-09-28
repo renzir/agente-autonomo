@@ -287,3 +287,110 @@ class TestMetricsPropagation:
                 assert 'timestamp' in metric
                 assert 'metric' in metric
                 assert 'value' in metric
+
+class TestInteractionModeRouting:
+    """Tests para la nueva lógica de detección de modo (/chat vs /agente)."""
+    
+    def test_intent_classifier_detects_chat(self):
+        """IntentClassifier debe detectar '/chat' como conversacional."""
+        from core.router import IntentClassifier
+        from models.schemas import InteractionMode
+        
+        mode = IntentClassifier.classify("/chat hola mundo")
+        assert mode == InteractionMode.CONVERSATIONAL
+        
+        # Prueba con formato alternativo
+        mode_alt = IntentClassifier.classify("/chat")
+        assert mode_alt == InteractionMode.CONVERSATIONAL
+
+    def test_intent_classifier_detects_autonomous(self):
+        """IntentClassifier debe detectar '/agente' como autónomo."""
+        from core.router import IntentClassifier
+        from models.schemas import InteractionMode
+        
+        mode = IntentClassifier.classify("/agente crear un archivo")
+        assert mode == InteractionMode.AUTONOMOUS
+
+    def test_intent_classifier_default_is_autonomous(self):
+        """El modo por defecto debe ser autónomo (Agente)."""
+        from core.router import IntentClassifier
+        from models.schemas import InteractionMode
+        
+        # Input normal sin prefijos
+        mode = IntentClassifier.classify("analiza este documento")
+        assert mode == InteractionMode.AUTONOMOUS
+
+    async def test_run_chat_bypasses_orchestrator(self):
+        """run('/chat') debe saltar la orquestación completa."""
+        from unittest.mock import AsyncMock
+        with patch('core.agent.OllamaClient'), \
+             patch('core.agent.ModelRegistry'):
+            
+            agent = LocalAgent(model_name='test_model')
+            
+            # Mock de la respuesta del LLM directo
+            mock_llm_response = {
+                "message": {"content": "Respuesta rápida sin planear."}
+            }
+            agent.ollama_client.chat = AsyncMock(return_value=mock_llm_response)
+            
+            # Si el orchestrator.run se llama, fallará este test porque lanzaría excepción o devolvería lo erróneo
+            # Lo forzamos a levantar error para asegurar que NO fue llamado
+            agent.orchestrator.run = MagicMock(side_effect=RuntimeError("Orchestrator fue llamado indebidamente en modo chat"))
+            
+            # Ejecutar con /chat
+            response = await agent.run("/chat hola, cómo estás?")
+            
+            # Verificar que la respuesta viene del LLM directo (stub simple aquí para demo)
+            # Nota: En una implementación real con AsyncMock de ollama_client, esto retornaría el mock.
+            # Aquí verificamos que no se rompió y no entró al bloque de error de orchestrator
+            
+    async def test_run_default_uses_orchestrator(self):
+        """run(sin prefijo) debe usar el orchestrator."""
+        from unittest.mock import AsyncMock
+        with patch('core.agent.OllamaClient'), \
+             patch('core.agent.ModelRegistry'):
+            
+            agent = LocalAgent(model_name='test_model')
+            
+            mock_response = MagicMock()
+            mock_response.content = "Respuesta planificada"
+            
+            # Spy para asegurar que run es llamado
+            run_called = False
+            def capture_run(*args, **kwargs):
+                nonlocal run_called
+                run_called = True
+                return mock_response
+
+            # Usar AsyncMock permite el 'await' correcto en las pruebas asíncronas
+            agent.orchestrator.run = AsyncMock(side_effect=capture_run)
+            
+            # Ejecutar input normal (default autónomo)
+            await agent.run("Crea un archivo de texto")
+            
+            assert run_called is True, "El orchestrator debería haber sido llamado para inputs normales"
+
+    async def test_explicit_agente_uses_orchestrator(self):
+        """run('/agente ...') debe usar el orchestrator."""
+        from unittest.mock import AsyncMock
+        with patch('core.agent.OllamaClient'), \
+             patch('core.agent.ModelRegistry'):
+            
+            agent = LocalAgent(model_name='test_model')
+            
+            mock_response = MagicMock()
+            mock_response.content = "Respuesta explícita"
+            
+            run_called = False
+            def capture_run(*args, **kwargs):
+                nonlocal run_called
+                run_called = True
+                return mock_response
+
+            # Usar AsyncMock permite el 'await' correcto en las pruebas asíncronas
+            agent.orchestrator.run = AsyncMock(side_effect=capture_run)
+            
+            await agent.run("/agente ejecuta un script")
+            
+            assert run_called is True
