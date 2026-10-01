@@ -32,7 +32,7 @@ except ImportError:
 
 class Planner:
     """Divide una tarea compleja en subpasos accionables para el agente."""
-
+    print("[TRACE] PLANNER START")
     def __init__(self, llm_client=None, config: dict = None):
         self.logger = logging.getLogger(__name__)
         self.llm_client = llm_client
@@ -92,6 +92,7 @@ class Planner:
 
         # 2. Llamar al LLM ASINCRONAMENTE usando chat() (ya que generate_completion no existe)
         try:
+            print("[TRACE] PLANNER -> OLLAMA")
             response_dict = await self.llm_client.chat(
                 messages=[
                     {"role": "system", "content": system_prompt},

@@ -154,7 +154,9 @@ class OllamaClient:
         stream: bool = False,  # AGREGA ESTE PARÁMETRO
         **params: Any,
     ) -> dict[str, Any] | AsyncGenerator[tuple[str, bool], None]:  # MODIFICA EL TIPO DE RETORNO
-        
+        import time
+        t = time.perf_counter()
+        print("[TRACE] OLLAMA START")
         # AGREGA ESTO AL INICIO DEL MÉTODO:
         if stream:
             return self.chat_stream(messages, model=model, tools=tools, **params)
@@ -208,6 +210,8 @@ class OllamaClient:
                 if "message" not in final_response:
                     final_response["message"] = {}
                 final_response["message"]["content"] = full_content
+
+            print(f"[TRACE] OLLAMA END: {time.perf_counter() - t:.2f}s")
                 
             return final_response if final_response else {"error": "No se pudo parsear la respuesta de Ollama"}
     

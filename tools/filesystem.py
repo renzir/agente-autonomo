@@ -25,6 +25,7 @@ def _get_sandbox() -> Sandbox:
 
 def read_file_tool(args: dict, permission: str = "read", risk_level: str = "low") -> str:
     """Lee un archivo. Valida sandbox antes de leer. §10"""
+    print(f"[TRACE] READ_FILE ARGS: {args}")
     path_str = args.get("path")
     if not path_str:
         return "Error: 'path' argument is required."

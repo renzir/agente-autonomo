@@ -5,7 +5,7 @@ agent:
 
 context:
   hard_limit: 32768           # Límite estricto basado en el modelo con menor contexto (32K)
-  target_input: 14000         # Objetivo de tokens de entrada para optimizar latencia
+  target_input: 14000        # Objetivo de tokens de entrada para optimizar latencia
   warning: 18000              # Alerta al acercarse al límite del target
   compression: 20000          # Trigger para aplicar compresión de contexto
   emergency_limit: 24000      # Límite de emergencia antes de forzar limpieza agresiva

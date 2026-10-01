@@ -2,6 +2,7 @@
 core/agent.py - Punto de entrada del agente (§12)
 Conecta config, models, core modules y expone la API pública.
 Filosofía: NO hardcode nada; usa las capas inyectadas.
+Modificado: Clasificación estricta de modo (/chat vs /agente vs default).
 """
 
 import logging
@@ -18,7 +19,7 @@ if root_dir not in sys.path:
 try:
     from models.ollama_client import OllamaClient
     from models.model_registry import ModelRegistry
-    from models.schemas import AgentConfig, ToolMetadata
+    from models.schemas import AgentConfig, ToolMetadata, InteractionMode
 except ImportError as e:
     logging.error(f"Error importing models: {e}")
     sys.exit(1)
@@ -26,9 +27,15 @@ except ImportError as e:
 # Core imports
 from core.state import SessionState, Message
 from core.planner import Planner
-from core.router import Router, IntentClassifier 
+from core.router import Router 
+# Importamos el clasificador aquí para usarlo en la lógica de enrutamiento estricta
+from core.router import IntentClassifier 
 from core.orchestrator import Orchestrator
-from models.schemas import InteractionMode
+
+# Herramientas reales (no implementadas aún native tool calling, pero disponibles)
+from tools.filesystem import read_file_tool, list_files_tool, create_file_tool, modify_file_tool
+from tools.search import search_text_tool
+from tools.shell import execute_command_tool
 
 
 # Configuración de logging
@@ -39,116 +46,119 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class MetricsLogger:
-    """
-    Interfaz mínima para métricas (§12).
-    Implementa log(metric_name, value_or_dict)
-    
-    Este logger puede ser reemplazado por una implementación real en producción.
-    """
-    
-    def __init__(self):
-        self.metrics_history = []
-    
-    def log(self, metric_name: str, value_or_dict: Any):
-        """
-        Registra una métrica.
-        
-        Args:
-            metric_name: Nombre de la métrica (ej: 'tokens_used', 'verification_pass')
-            value_or_dict: Valor numérico o diccionario con detalles
-        """
-        self.metrics_history.append({
-            'timestamp': __import__('time').time(),
-            'metric': metric_name,
-            'value': value_or_dict
-        })
-        logger.debug(f"Métrica registrada: {metric_name} = {value_or_dict}")
-
+import yaml
 
 class LocalAgent:
-    """
-    Agente local completo que conecta todas las capas.
-    
-    Arquitectura:
-    - Config/Models: Carga y configuración desde models/ y config/
-    - State: Gestión de estado de sesión (core/state.py)
-    - Planner: División de tareas (core/planner.py)
-    - Router: Selección de herramientas (core/router.py)
-    - Orchestrator: Ciclo principal (core/orchestrator.py)
-    
-    NO hardcode nada; usa las capas inyectadas.
-    """
-    
     def __init__(
         self, 
         config_path: Optional[str] = None,
-        model_name: str = "qwen3.6:latest",  # Modelo por defecto
-        base_url: str = "http://localhost:11434"
+        model_name: Optional[str] = None,
+        base_url: Optional[str] = None,
+        sandbox_enabled: bool = True
     ):
         self.logger = logging.getLogger(__name__)
         
-        # 1. Carga config y modelos desde models/ (§12)
-        self.config = self._load_config(config_path)
+        # 1. Cargar configuración desde archivos YAML en config/
+        self.config = self._load_agent_config(config_path)
+        models_config = self._load_models_config()
+        endpoint_config = self._load_endpoint_config()
         
+        # 2. Determinar model_name y base_url desde config si no se proporcionan
+        resolved_model = model_name or self._resolve_model_name(models_config)
+        resolved_base_url = base_url or self._resolve_endpoint(endpoint_config)
+        
+        self.logger.info(f"Modelo resuelto: {resolved_model}")
+        self.logger.info(f"Endpoint resuelto: {resolved_base_url}")
+        
+        # 3. Inicializar OllamaClient con los valores configurados
         self.model_registry = ModelRegistry()
         self.ollama_client = OllamaClient(
-            base_url=base_url,
-            model_name=model_name,
-            max_tokens=self.config.get('agent', {}).get('max_tokens', 4096)
+            base_url=resolved_base_url,
+            model_name=resolved_model,
+            max_tokens=models_config.get('defaults', {}).get('max_tokens', 2048)
         )
         
-        # 2. Construye state (§12)
+        # 4. Configurar Sandbox desde config/agent.yaml
+        safety_config = self.config.get('safety', {})
+        if sandbox_enabled and safety_config.get('sandbox_enabled', True):
+            allowed_dirs = safety_config.get('allowed_dirs', ['.'])
+            command_timeout = safety_config.get('command_timeout', 30)
+            
+            from safety.sandbox import Sandbox
+            self.sandbox = Sandbox(
+                allowed_dirs=allowed_dirs,
+                timeout=command_timeout
+            )
+            sandbox_config = self.sandbox.config
+        else:
+            self.sandbox = None
+            sandbox_config = {"sandbox_enabled": False}
+        
+        # 5. Construir state (§12)
         self.state_factory = SessionState
         
-        # 3. Une orchestrator + router + planner (§12)
+        # 6. Unir orchestrator + router + planner (§12)
         self.planner = Planner(
             llm_client=self.ollama_client,
             config=self.config
         )
         
-        # Cargar herramientas disponibles desde registry si existe
+        # Cargar herramientas disponibles incluyendo sandbox config
         available_tools = self._get_tool_metadata()
         self.router = Router(tool_registry=available_tools)
         
-        # ✅ CAMBIO CRÍTICO §14: Importar y usar el MetricsLogger REAL de metrics/logger.py
-        try:
-            from metrics.logger import MetricsLogger as RealMetricsLogger
-            self.metrics_logger = RealMetricsLogger(path="metrics/run.jsonl")
-        except ImportError:
-            logger.warning("No se pudo importar MetricsLogger, usando stub.")
-            
+        # Métricas (§14 wiring)
+        from metrics.logger import MetricsLogger
+        self.metrics_logger = MetricsLogger(path="metrics/run.jsonl")
+
         # Construir orchestrator con dependencias inyectadas (§12) + métricas (§14 wiring)
         self.orchestrator = Orchestrator(
             llm_client=self.ollama_client,
             planner=self.planner,
             router=self.router,
             config=self.config,
-            metrics_logger=self.metrics_logger  # ← INYECCIÓN CRÍTICA DE MÉTRICAS (§14)
+            metrics_logger=self.metrics_logger
         )
         
-        # Estado actual de sesión (se crea por run)
         self.current_session: Optional[SessionState] = None
         
-        self.logger.info("Agente local inicializado correctamente")
-        self.logger.debug(f"Configuración cargada: {self.config}")
-    
-    def _load_config(self, config_path: Optional[str]) -> dict:
+        self.logger.info("Agente local inicializado correctamente con detección de modo estricta")
+
+
+    async def run(self, user_input: str):
+        print(f"[TRACE] RUN START: {user_input}")
+        self.logger.info(f"Agente ejecutando: {user_input[:50]}...")
+
+        mode = IntentClassifier.classify(user_input)
+
+        print(f"[TRACE] MODE: {mode}")
+
+        if mode == InteractionMode.CONVERSATIONAL:
+            print("[TRACE] -> CONVERSATIONAL")
+            return await self._handle_conversational_mode(user_input)
+
+        print("[TRACE] -> AUTONOMOUS")
+        return await self._handle_autonomous_mode(user_input)
+
+    def _load_agent_config(self, config_path: Optional[str]) -> dict:
         """Carga configuración desde agent.yaml o usa defaults."""
-        import yaml
+        if config_path is None:
+            config_path = "config/agent.yaml"
         
         default_config = {
             'agent': {
-                'model': 'qwen3.6:latest',
                 'max_iterations': 10,
                 'max_tool_calls': 20,
-                'max_execution_time_seconds': 300,
-                'max_tokens': 4096
+                'max_execution_time': 300
             },
-            'security': {
-                'strict_mode': True,
-                'allowed_permissions': ['read', 'write'],
-                'risk_threshold': 'high'
+            'context': {
+                'hard_limit': 32768,
+                'target_input': 14000
+            },
+            'safety': {
+                'sandbox_enabled': True,
+                'allowed_dirs': ['.'],
+                'command_timeout': 30
             }
         }
         
@@ -156,143 +166,127 @@ class LocalAgent:
             try:
                 with open(config_path, 'r') as f:
                     yaml_config = yaml.safe_load(f)
-                    # Merge con defaults
                     for key in yaml_config:
                         default_config[key] = yaml_config[key]
-                self.logger.info(f"Configuración cargada desde {config_path}")
+                self.logger.info(f"Configuración de agente cargada desde {config_path}")
             except Exception as e:
-                self.logger.warning(f"No se pudo cargar config: {e}, usando defaults")
+                self.logger.warning(f"No se pudo cargar config/agent.yaml: {e}, usando defaults")
         
         return default_config
-    
+
+    def _load_models_config(self) -> dict:
+        """Carga configuración de modelos desde models.yaml."""
+        models_path = "config/models.yaml"
+        default_config = {
+            'models': {'primary': 'qwen3.6:latest'},
+            'defaults': {
+                'model': 'primary',
+                'temperature': 0.7,
+                'max_tokens': 2048
+            }
+        }
+        
+        if os.path.exists(models_path):
+            try:
+                with open(models_path, 'r') as f:
+                    return yaml.safe_load(f) or default_config
+            except Exception as e:
+                self.logger.warning(f"No se pudo cargar models.yaml: {e}")
+        
+        return default_config
+
+    def _load_endpoint_config(self) -> dict:
+        """Carga configuración del endpoint desde ollama_endpoint.yaml."""
+        endpoint_path = "config/ollama_endpoint.yaml"
+        default_config = {'endpoint': 'http://localhost:11434'}
+        
+        if os.path.exists(endpoint_path):
+            try:
+                with open(endpoint_path, 'r') as f:
+                    loaded = yaml.safe_load(f)
+                    return loaded or default_config
+            except Exception as e:
+                self.logger.warning(f"No se pudo cargar ollama_endpoint.yaml: {e}")
+        
+        return default_config
+
+    def _resolve_model_name(self, models_config: dict) -> str:
+        """Resuelve el nombre del modelo usando la config de models.yaml."""
+        defaults = models_config.get('defaults', {})
+        model_key = defaults.get('model', 'primary')
+        models = models_config.get('models', {})
+        
+        # Si model_key existe en models, usar ese; sino fallback a default
+        return models.get(model_key, 'qwen3.6:latest')
+
+    def _resolve_endpoint(self, endpoint_config: dict) -> str:
+        """Resuelve el endpoint de Ollama."""
+        return endpoint_config.get('endpoint', 'http://localhost:11434')
+
+
     def _get_tool_metadata(self) -> Dict[str, ToolMetadata]:
         """Obtiene metadatos de herramientas desde el registry."""
-        # Esta información debería venir de tool_registry (implementación futura)
-        # Por ahora, definimos las interfaces disponibles
-        
-        tools = {}
-        
+        # Implementación por defecto segura para pruebas y dev
         if hasattr(self.model_registry, 'get_tool_metadata'):
+            tools = {}
             for tool_name in ['filesystem', 'search', 'shell', 'git']:
                 try:
                     metadata = self.model_registry.get_tool_metadata(tool_name)
                     tools[tool_name] = metadata
                 except (AttributeError, KeyError):
                     continue
+            if tools:
+                return tools
         
-        # Si no hay registry implementado, usar defaults seguros
-        if not tools:
-            tools = {
-                'filesystem': ToolMetadata(
-                    name='filesystem',
-                    description='Operaciones de archivos y directorios',
-                    input_schema={'path': 'string', 'content': 'string (opcional)'},
-                    permission='write',
-                    risk='medium',
-                    timeout=30,
-                    cost=0.0
-                ),
-                'search': ToolMetadata(
-                    name='search',
-                    description='Búsqueda en internet o base de conocimiento',
-                    input_schema={'query': 'string'},
-                    permission='read',
-                    risk='low',
-                    timeout=60,
-                    cost=0.0
-                ),
-                'shell': ToolMetadata(
-                    name='shell',
-                    description='Ejecutar comandos del sistema operativo',
-                    input_schema={'command': 'string'},
-                    permission='execute',
-                    risk='high',
-                    timeout=30,
-                    cost=0.0
-                ),
-                'git': ToolMetadata(
-                    name='git',
-                    description='Operaciones con repositorios Git',
-                    input_schema={'action': 'string', 'args': 'list'},
-                    permission='execute',
-                    risk='medium',
-                    timeout=60,
-                    cost=0.0
-                )
-            }
-        
-        return tools
-    
-    async def run(self, user_input: str) -> Message:
-        """
-        Punto de entrada principal del ciclo. Expone run(user_input) -> response.
-        
-        Este método decide automáticamente entre:
-        1. Modo Conversacional (/chat): Respuesta directa vía LLM sin Planner ni Router.
-        2. Modo Autónomo (/agente o default): Ejecución completa del Orchestrator.
-        
-        NO hardcodea nada; usa las capas inyectadas (orchestrator, router, planner).
-        
-        Args:
-            user_input: Entrada textual del usuario
-            
-        Returns:
-            Message con la respuesta del agente
-        """
-        self.logger.info(f"Agente ejecutando: {user_input[:50]}...")
-        
-        # 1. Detectar Modo de Interacción
-        mode = IntentClassifier.classify(user_input)
-        
-        # 2. Ruta Rápida: Modo Conversacional (/chat)
-        if mode == InteractionMode.CONVERSATIONAL:
-            return await self._handle_conversational_mode(user_input)
+        # Defaults seguros si no hay registry completo
+        return {
+            'filesystem': ToolMetadata(
+                name='filesystem', description='Operaciones de archivos y directorios',
+                permission='write', risk='medium'
+            ),
+            'search': ToolMetadata(
+                name='search', description='Búsqueda en internet o base de conocimiento',
+                permission='read', risk='low'
+            ),
+            'shell': ToolMetadata(
+                name='shell', description='Ejecutar comandos del sistema operativo',
+                permission='execute', risk='high'
+            ),
+            'git': ToolMetadata(
+                name='git', description='Operaciones con repositorios Git',
+                permission='execute', risk='medium'
+            )
+        }
 
-        # 3. Ruta Compleja: Modo Autónomo (Predeterminado o /agente)
-        return await self._handle_autonomous_mode(user_input)
+    async def _handle_conversational_mode(self, user_input: str):
+        print("[TRACE] CONVERSATIONAL START")
 
-    async def _handle_conversational_mode(self, user_input: str) -> Message:
-        """
-        Maneja interacciones rápidas sin Planner ni Router.
-        Usa el LLM directamente para respuestas contextuales.
-        """
         state = self.state_factory()
-        state.add_message('user', user_input)
-        
-        # Prompt optimizado para conversación rápida (sin contexto de herramientas)
+        state.add_message("user", user_input)
+
         system_prompt = (
             "Eres un asistente útil y conciso. Responde a las preguntas del usuario "
             "directamente sin usar herramientas externas ni realizar planes complejos."
         )
 
         if self.ollama_client:
-            try:
-                # Llamada directa al LLM bypassando el Orchestrator
-                response = await self.ollama_client.chat(
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_input}
-                    ],
-                    temperature=0.7,
-                    max_tokens=512
-                )
-                
-                if isinstance(response, dict):
-                    content = response.get("message", {}).get("content", "") or response.get("content", "")
-                else:
-                    content = str(response)
-                    
-                return Message(role="assistant", content=content.strip())
-            except Exception as e:
-                self.logger.error(f"Error en modo conversacional: {e}")
-                return Message(role="assistant", content="Lo siento, hubo un error procesando tu mensaje.")
-        else:
-            # Fallback si no hay LLM (raro, pero posible en tests unitarios)
-            return Message(role="assistant", content=f"(Modo Chat) He recibido tu mensaje: {user_input}")
+            print("[TRACE] CONVERSATIONAL -> OLLAMA")
 
+            return self.ollama_client.chat_stream(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_input},
+                ],
+                temperature=0.7,
+                max_tokens=512,
+            )
+
+        return None
+    
     async def _handle_autonomous_mode(self, user_input: str) -> Message:
         """
         Ejecuta el flujo completo actual: Planner -> Router -> Orchestrator.
+        Se activa por defecto (sin prefijo) o si se especifica '/agente'.
         Preserva toda la lógica existente de herramientas y seguridad.
         """
         # Crear nuevo estado de sesión para esta ejecución
@@ -302,76 +296,79 @@ class LocalAgent:
         # Construir herramientas stub disponibles (lógica original intacta)
         tools_map = self._get_tools_map()
         
-        # Ejecutar ciclo completo vía orchestrator (§12)
         response = await self.orchestrator.run(
-            task=user_input,
-            state=state,
-            tools_map=tools_map,
-            logger_callback=self.metrics_logger  # Métricas inyectadas (§12)
+        task=user_input,
+        state=state,
+        tools_map=tools_map,
+        logger_callback=self.metrics_logger  # Métricas inyectadas (§12)
+    )
+    
+         # === AGREGAR ESTE BLOQUE DE VALIDACIÓN ===
+        if response is None:
+            self.logger.error(
+                f"Orchestrator devolvió None para tarea: {user_input[:50]}... "
+                f"Generando respuesta fallback."
         )
-        
-        return response
+        return Message(
+            role="assistant",
+            content=f"[SISTEMA] No se pudo procesar la solicitud. Intente nuevamente más tarde."
+        )
 
     def _get_tools_map(self) -> Dict[str, Callable]:
         """
         Construye el mapa de herramientas para el orchestrator.
         
-        En una implementación real, esto sería inyectado desde una capa de 
-        herramientas externa (tools/). Aquí usamos stubs seguros para testing.
+        Importa las funciones reales desde tools/ y las expone al orchestrator.
         
         Returns:
             dict[str, Callable] - Mapeo nombre_herramienta -> función ejecutable
         """
-        # Por seguridad y simplicidad en esta fase, devolvemos stubs
-        # En producción, estas funciones vendrían de tools/ con acceso real
+        # Mapeo de nombres lógicos (usados por el orchestrator/router) a funciones reales
         
-        def safe_filesystem(args: dict, permission='default', risk_level='low') -> Any:
-            """Stub seguro para filesystem."""
-            if risk_level in ['high', 'critical']:
-                raise PermissionError("Acceso denegado por política de seguridad")
+        def filesystem_wrapper(args: dict, permission: str = "read", risk_level: str = "low") -> Any:
+            operation = args.get('operation')
+            if not operation:
+                return "Error: 'operation' argument is required. Valid operations: create_file, modify_file, list_files, read_file."
             
-            path = args.get('path', 'no_path')
-            content = args.get('content', '')
+            dispatch_map = {
+                'create_file': create_file_tool,
+                'modify_file': modify_file_tool,
+                'list_files': list_files_tool,
+                'read_file': read_file_tool,
+            }
             
-            # Loguear operación (seguridad)
-            logger.info(f"[TOOLS] filesystem: {args}")
+            target_fn = dispatch_map.get(operation)
+            if not target_fn:
+                return f"Error: Unknown filesystem operation '{operation}'. Valid operations: {', '.join(dispatch_map.keys())}"
             
-            return {"status": "success", "operation": "filesystem_stub", "path": path}
+            clean_args = {k: v for k, v in args.items() if k != 'operation'}
+            return target_fn(clean_args, permission, risk_level)
         
-        def safe_search(args: dict, permission='default', risk_level='low') -> Any:
-            """Stub seguro para search."""
-            query = args.get('query', 'no_query')
-            
-            logger.info(f"[TOOLS] search: {args}")
-            
-            return {"status": "success", "operation": "search_stub", "results": [f"Result para '{query}'"]}
         
-        def safe_shell(args: dict, permission='default', risk_level='low') -> Any:
-            """Stub seguro para shell (no ejecuta comandos reales en testing)."""
-            command = args.get('command', 'no_command')
-            
-            if risk_level in ['high', 'critical'] and not self.config.get('security', {}).get('strict_mode'):
-                raise PermissionError("Ejecución de shell bloqueada por seguridad")
-            
-            logger.info(f"[TOOLS] shell (stub): {args}")
-            
-            return {"status": "success", "operation": "shell_stub", "output": f"Comando ejecutado: {command}"}
+        def search_wrapper(args: dict, permission: str = "read", risk_level: str = "low") -> Any:
+            """Wrapper para búsqueda que delega en search_text_tool."""
+            if 'query' in args and 'pattern' not in args:
+                args['pattern'] = args.pop('query')
+            return search_text_tool(args, permission, risk_level)
         
-        def safe_git(args: dict, permission='default', risk_level='low') -> Any:
-            """Stub seguro para git."""
+        def shell_wrapper(args: dict, permission: str = "execute", risk_level: str = "high") -> Any:
+            """Wrapper para shell que delega en execute_command_tool."""
+            return execute_command_tool(args, permission, risk_level)
+        
+        def git_stub(args: dict, permission: str = "execute", risk_level: str = "medium") -> Any:
+            """Stub para git hasta que se implementen las operaciones."""
             action = args.get('action', 'status')
-            
-            logger.info(f"[TOOLS] git: {args}")
-            
+            logger.info(f"[TOOLS] git (stub): {args}")
             return {"status": "success", "operation": "git_stub", "action": action}
         
         return {
-            'filesystem': safe_filesystem,
-            'search': safe_search,
-            'shell': safe_shell,
-            'git': safe_git
+            'filesystem': filesystem_wrapper,
+            'search': search_wrapper,
+            'shell': shell_wrapper,
+            'git': git_stub
         }
-    
+
+
     def get_metrics(self) -> List[Dict[str, Any]]:
         """Obtiene las métricas acumuladas de la ejecución actual."""
         return self.metrics_logger.metrics_history
@@ -383,20 +380,25 @@ class LocalAgent:
         self.logger.info("Sesión reiniciada")
         
 # API pública simplificada
-def create_agent(config_path: str = "config/agent.yaml", model_name: str = "qwen3.6:latest") -> LocalAgent:
+def create_agent(
+    config_path: str = "config/agent.yaml",
+    model_name: Optional[str] = None,
+    base_url: Optional[str] = None,
+    sandbox_enabled: bool = True
+) -> LocalAgent:
     """
-    Fábrica para crear un agente con configuración por defecto.
+    Fábrica para crear un agente con configuración desde config/.
     
     Args:
-        config_path: Ruta al archivo de configuración YAML
-        model_name: Nombre del modelo Ollama a usar
-        
-    Returns:
-        Instancia de LocalAgent configurada
+        config_path: Ruta al archivo agent.yaml
+        model_name: Modelo override (None = usar models.yaml)
+        base_url: Endpoint override (None = usar ollama_endpoint.yaml)
+        sandbox_enabled: Activar sandbox basado en agent.yaml
     """
     return LocalAgent(
         config_path=config_path,
-        model_name=model_name
+        model_name=model_name,
+        base_url=base_url
     )
 
 
@@ -407,7 +409,9 @@ if __name__ == "__main__":
     agent = create_agent(model_name="qwen3.6:latest")
     
     # Prueba con input simple
-    response = agent.run("¿Qué herramientas tienes disponibles?")
+    # Nota: En un entorno real, esto debería ser async y usado con asyncio.run()
+    import asyncio
+    response = asyncio.run(agent.run("¿Qué herramientas tienes disponibles?"))
     
     print(f"\nRespuesta del agente: {response.content}")
     print(f"Métricas: {len(agent.get_metrics())} registros")

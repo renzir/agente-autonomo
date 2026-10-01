@@ -1,69 +1,71 @@
 """
-core/router.py - Enrutador de herramientas del agente
-Recibe la intención del usuario y decide qué herramienta usar.
-Basado en metadatos de herramientas del registry.
+core/router.py - Enrutador simplificado del agente.
+Objetivo: Reducir la predicción temprana de herramientas y hacer el enrutamiento robusto.
+El clasificador de intención ahora es estricto con prefijos (/chat, /agente).
+El router ya no adivina la herramienta basada en keywords complejas.
 """
 import re
 import logging
 from typing import Tuple, Callable, Dict, List, Optional, Any
 from pydantic import BaseModel, Field
-from models.schemas import InteractionMode
 
-# ... existing imports ...
-from models.schemas import InteractionMode
+# Importamos el modo de interacción directo si está disponible, sino fallback
+try:
+    from models.schemas import InteractionMode, ToolMetadata
+except ImportError:
+    # Fallback para compatibilidad en tests o entornos sin imports completos
+    class InteractionMode:
+        CONVERSATIONAL = "conversational"
+        AUTONOMOUS = "autonomous"
 
 class IntentClassifier:
     """
-    Clasificador ligero de intención basado EXCLUSIVAMENTE en prefijos explícitos.
-    No usa heurísticas de palabras clave para evitar falsos positivos/negativos.
+    Clasificador LIGERO y ERECTO de intención basado SOLO en prefijos explícitos.
+    No usa heurísticas de palabras clave para evitar falsos positivos.
+    
+    Reglas estrictas:
+    1. Input que empieza con '/chat' (o '/chat ') -> CONVERSATIONAL.
+    2. Input que empieza con '/agente' (o '/agente ') -> AUTONOMOUS.
+    3. Cualquier otro input (sin prefijo) -> AUTONOMOUS por defecto.
     """
     
     @classmethod
-    def classify(cls, text: str) -> InteractionMode:
+    def classify(cls, text: str) -> str:
         """
-        Clasifica el input del usuario según comandos explícitos.
+        Clasifica el input del usuario según comandos explícitos al inicio.
         
-        Reglas:
-        1. Si empieza con /chat -> Conversational.
-        2. Si empieza con /agente -> Autonomous.
-        3. Default -> Autonomous (mantiene compatibilidad y comportamiento actual).
-        """
-        text_lower = text.lower().strip()
-        
-        # Chequeo estricto de prefijos para robustez
-        if text_lower.startswith('/chat') or text_lower.startswith('/chat '):
-            return InteractionMode.CONVERSATIONAL
+        Args:
+            text: Input crudo del usuario
             
-        if text_lower.startswith('/agente') or text_lower.startswith('/agente '):
+        Returns:
+            InteractionMode.CONVERSATIONAL o InteractionMode.AUTONOMOUS
+        """
+        if not text or not isinstance(text, str):
             return InteractionMode.AUTONOMOUS
         
-        # Default por defecto (manteniendo la lógica anterior de fallback a complejo)
+        text_stripped = text.strip().lower()
+        
+        # Detección estricta de prefijo al inicio para evitar activaciones erróneas
+        # Ej: "hola /chat" NO debe activar conversacional. Solo "/chat hola sí" SÍ.
+        
+        if text_stripped.startswith('/chat') and (len(text_stripped) == 5 or text_stripped[5] in (' ', '\n', '\t')):
+            return InteractionMode.CONVERSATIONAL
+            
+        if text_stripped.startswith('/agente') and (len(text_stripped) == 7 or text_stripped[7] in (' ', '\n', '\t')):
+            return InteractionMode.AUTONOMOUS
+        
+        # Default: Si no hay prefijo explícito, asumir modo autónomo (comportamiento original seguro)
         return InteractionMode.AUTONOMOUS
-
-# Importar modelos existentes para compatibilidad
-try:
-    from models.schemas import ToolMetadata
-except ImportError:
-    # Fallback si los modelos no están disponibles
-    class ToolMetadata(BaseModel):
-        name: str
-        description: str
-        input_schema: Dict[str, Any] = Field(default_factory=dict)
-        permission: str = "read"  # CORREGIDO §9,§17: read/write/execute/admin (no default)
-        risk: str = "low"  # CORREGIDO §9,§17: low/medium/high/critical
-        timeout: int = 30
-        cost: float = 0.0
 
 
 class RouterDecision(BaseModel):
-    """Resultado de la decisión del enrutador."""
+    """Resultado de la decisión del enrutador simplificado."""
     tool_name: str
     args: Dict[str, Any] = Field(default_factory=dict)
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str = ""
     
     def to_dict(self) -> dict:
-        """Convierte a diccionario."""
         return {
             'tool_name': self.tool_name,
             'args': self.args,
@@ -73,31 +75,41 @@ class RouterDecision(BaseModel):
 
 
 class Router:
-    """Enrutador que decide qué herramienta usar según la intención del usuario."""
+    """
+    Enrutador simplificado.
+    
+    Ya no intenta adivinar qué herramienta (filesystem, search, shell) necesita el agente
+    basándose en el contenido semántico del input para evitar falsos positivos.
+    
+    Ahora delega la selección fina de herramientas al flujo posterior del agente (native tool calling / planner).
+    Su rol se reduce a validar disponibilidad y aplicar prioridades básicas si es necesario para el fallback.
+    """
     
     def __init__(self, tool_registry: Dict[str, ToolMetadata] = None):
         self.logger = logging.getLogger(__name__)
         self.tool_registry = tool_registry or {}
-        self.priority_order = [
-            'filesystem', 'search', 'shell', 'git', 'browser', 'code_editor'
-        ]
+        # Prioridad de fallback solo para selección inicial, no para predicción temprana
+        self.priority_order = ['filesystem', 'shell', 'search', 'git'] 
     
     def route(self, intention: str, available_tools: Dict[str, ToolMetadata] = None) -> RouterDecision:
         """
-        Decide qué herramienta usar basándose en la intención del usuario.
+        Decide qué herramienta usar.
+        
+        Simplificado: No usa keywords complejas para predecir la herramienta.
+        Si hay una intención clara o contexto previo, podría usarse, pero por defecto
+        devuelve un tool_name basado en prioridad/simple match para mantener compatibilidad
+        sin adivinar.
         
         Args:
-            intention: Descripción de lo que el usuario quiere hacer
-            available_tools: Diccionario de herramientas disponibles {name: metadata}
+            intention: Texto de la intención (ya procesado opcionalmente por IntentClassifier)
+            available_tools: Diccionario de herramientas disponibles
             
         Returns:
-            RouterDecision con la herramienta y args elegidos
+            RouterDecision con la herramienta elegida (por prioridad o default)
         """
-        self.logger.info(f"Enrutando intención: {intention[:50]}...")
-        
+        print("[TRACE] ROUTER START")
         tools_to_use = available_tools or self.tool_registry
         
-        # Si no hay herramientas, devolver decisión por defecto
         if not tools_to_use:
             return RouterDecision(
                 tool_name="",
@@ -105,106 +117,43 @@ class Router:
                 reason="No hay herramientas disponibles"
             )
         
-        # Analizar la intención para determinar la herramienta
-        decision = self._match_intention(intention, tools_to_use)
+        # Simplificación: Ya no hacemos keyword matching complejo aquí.
+        # Devolvemos la herramienta de mayor prioridad disponible para mantener el flujo.
+        # La selección real se hará más tarde en el agente.
+        decision = self._simple_match(tools_to_use)
         
-        self.logger.info(f"Decisión del router: {decision.tool_name} "
-                        f"(confianza: {decision.confidence:.2f})")
+        self.logger.debug(f"Decisión del router simplificado: {decision.tool_name}")
+        print(f"[TRACE] ROUTER DECISION: {decision}")
         return decision
     
-    def _match_intention(self, intention: str, 
-                        available_tools: Dict[str, ToolMetadata]) -> RouterDecision:
-        """Empareja la intención del usuario con herramientas disponibles."""
-        
-        # Palabras clave para cada tipo de herramienta
-        keyword_mapping = {
-            'filesystem': ['leer', 'escribir', 'archivo', 'crear', 'eliminar', 
-                          'renombrar', 'copiar', 'mover', 'carpeta', 'directorio',
-                          'read', 'write', 'file', 'folder', 'directory'],
-            'search': ['buscar', 'encontrar', 'buscar en internet', 'google',
-                      'search', 'find', 'query'],
-            'shell': ['ejecutar', 'command', 'cmd', 'terminal', 'bash', 'sh', 
-                     'run', 'execute', 'proceso'],
-            'git': ['git', 'commit', 'push', 'pull', 'branch', 'repositorio',
-                   'repo', 'merge', 'clonar'],
-            'browser': ['navegar', 'web', 'url', 'abrir página', 'scraper',
-                       'browse', 'visit', 'website'],
-            'code_editor': ['editar código', 'programar', 'refactorizar', 
-                           'debug', 'compilar', 'code', 'edit']
-        }
-        
-        # Calcular score para cada herramienta
-        scores = {}
-        intention_lower = intention.lower()
-        
-        for tool_name, keywords in keyword_mapping.items():
-            if tool_name not in available_tools:
-                continue
-            
-            score = 0.0
-            matched_keywords = []
-            
-            for keyword in keywords:
-                if keyword.lower() in intention_lower:
-                    score += 1.0
-                    matched_keywords.append(keyword)
-            
-            # Bonus por riesgo permitido si está en config
-            tool_meta = available_tools[tool_name]
-            if tool_meta.permission == "execute" and "ejecutar" in intention_lower:
-                score += 0.5
-            
-            scores[tool_name] = {
-                'score': score,
-                'matched_keywords': matched_keywords
-            }
-        
-        # Seleccionar la herramienta con mayor score
-        if scores:
-            best_tool = max(scores.items(), key=lambda x: x[1]['score'])
-            tool_name = best_tool[0]
-            score = best_tool[1]['score']
-            
-            # Normalizar confianza basado en el score
-            confidence = min(1.0, score / 2.0)  # Escala normalizada
-            
-            matched_keywords = best_tool[1]['matched_keywords']
-            reason = f"Keywords coincidentes: {', '.join(matched_keywords)}" if matched_keywords else "Selección por análisis semántico"
-            
-            return RouterDecision(
-                tool_name=tool_name,
-                confidence=confidence,
-                reason=reason
-            )
-
-        # Si no hubo keywords coincidentes (scores vacío), intentar por prioridad
+    def _simple_match(self, available_tools: Dict[str, ToolMetadata]) -> RouterDecision:
+        """
+        Selección simple por prioridad. Elimina la lógica de adivinanza.
+        """
+        # 1. Intentar encontrar una herramienta en el orden de prioridad estándar
         for tool_name in self.priority_order:
             if tool_name in available_tools:
                 return RouterDecision(
                     tool_name=tool_name,
-                    confidence=0.3,
-                    reason="Selección por prioridad (sin keywords coincidentes)"
+                    confidence=0.5, # Confianza base ya que no hay predicción semántica
+                    reason="Selección por prioridad de fallback"
                 )
-
-        # FALLBACK CRÍTICO: Si no hay match de keywords Y no hay herramientas en priority_order disponibles
-        # Esto evita el ValueError al intentar iterar sobre diccionarios vacíos o listas sin elementos
-        if available_tools:
-            # Si hay alguna herramienta disponible pero no está en la lista de prioridad, usar la primera disponible
-            fallback_tool = next(iter(available_tools.keys()))
+        
+        # 2. Si ninguna está en la lista de prioridad, tomar la primera disponible
+        for tool_name in available_tools.keys():
             return RouterDecision(
-                tool_name=fallback_tool,
-                confidence=0.1,
-                reason="Selección por defecto (no hay herramientas priorizadas disponibles)"
+                tool_name=tool_name,
+                confidence=0.3,
+                reason="Selección por disponibilidad (fallback)"
             )
 
-        # Si no hay absolutamente ninguna herramienta
+        # 3. Si no hay absolutamente nada
         return RouterDecision(
             tool_name="",
             confidence=0.0,
-            reason="No hay herramientas disponibles para enrutamiento"
+            reason="No hay herramientas disponibles en el registry"
         )
     
     def update_registry(self, tools: Dict[str, ToolMetadata]):
         """Actualiza el registry de herramientas."""
         self.tool_registry.update(tools)
-        self.logger.info(f"Registry actualizado con {len(tools)} herramientas")

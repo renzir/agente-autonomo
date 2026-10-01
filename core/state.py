@@ -62,6 +62,30 @@ class SessionState(BaseModel):
         self.messages.append(msg)
         self.updated_at = time.time()
         return msg
+
+    
+    def add_tool_result(self, step_id: str, result: Any) -> Message:
+        """
+        Registra el resultado de una herramienta dentro del estado/historial.
+        
+        Esta función tiene dos responsabilidades:
+        1. Almacena el resultado en results_cache para acceso rápido por paso.
+        2. Agrega un mensaje al historial de tipo 'tool_result' para que el LLM pueda verlo en el contexto.
+        """
+        # 1. Guardar en cache (normaliza el resultado)
+        normalized_result = result if isinstance(result, dict) else {"result": str(result)}
+        self.results_cache[step_id] = normalized_result
+        
+        # 2. Agregar mensaje al historial para que el contexto del LLM lo vea
+        tool_msg_content = json.dumps(normalized_result, ensure_ascii=False)
+        msg = Message(
+            role="tool_result",
+            content=f"Tool {step_id} result: {tool_msg_content}",
+            metadata={"tool_call_id": step_id}
+        )
+        self.messages.append(msg)
+        self.updated_at = time.time()
+        return msg
     
     def update_tokens(self, tokens: int):
         """Actualiza el contador de tokens usados."""
