@@ -179,33 +179,86 @@ class Orchestrator:
                     self.logger.warning(f"Límite de {self.max_tool_calls} tool calls alcanzado.")
                     break
                 
-                # Seleccionar herramienta con router (sin adivinar por keywords)
+                # Seleccionar herramienta:
+                # 1. Usar directamente la herramienta indicada por el Planner si es válida.
+                # 2. Usar Router únicamente como fallback si no existe una correspondencia directa.
                 state.set_phase('route')
-                decision = self.router.route(intention, available_tools=tools_map)
-                
-                # Si el router no puede decidir o no hay tools_map, saltamos este paso
-                if not decision.tool_name:
-                    continue
-                
-                tool_func = tools_map.get(decision.tool_name)
-                if not tool_func:
-                    self.logger.warning(f"Herramienta {decision.tool_name} no disponible en tools_map")
-                    continue
 
+                planner_tool = getattr(step, 'tool', '') or ''
+                planner_args = getattr(step, 'args', {}) or {}
+
+                # Adaptación de nombres semánticos del Planner a herramientas reales.
+                tool_aliases = {
+                    'write_file': ('filesystem', 'create_file'),
+                    'create_file': ('filesystem', 'create_file'),
+                    'file_writer': ('filesystem', 'create_file'),
+                    'modify_file': ('filesystem', 'modify_file'),
+                    'read_file': ('filesystem', 'read_file'),
+                    'list_files': ('filesystem', 'list_files'),
+                    
+                }
+                if planner_tool in tool_aliases:
+                    tool_name, operation = tool_aliases[planner_tool]
+
+                    decision_tool_name = tool_name
+                    decision_args = {
+                        'operation': operation,
+                        **planner_args,
+                    }
+
+                    # Adaptar filename -> path para create_file.
+                    if operation == 'create_file' and 'filename' in decision_args:
+                        decision_args['path'] = decision_args.pop('filename')
+
+                    print(
+                        f"[TRACE] PLANNER TOOL RESOLVED: "
+                        f"{planner_tool} -> {decision_tool_name} "
+                        f"args={decision_args}"
+                    )
+
+                else:
+                    # Fallback: si el Planner no conoce una herramienta directamente,
+                    # dejamos que el Router intente resolverla.
+                    print("[TRACE] PLANNER TOOL NOT RESOLVED -> ROUTER")
+
+                    decision = self.router.route(
+                        intention,
+                        available_tools=tools_map
+                    )
+
+                    if not decision.tool_name:
+                        continue
+
+                    decision_tool_name = decision.tool_name
+                    decision_args = decision.args or {}
+
+                tool_func = tools_map.get(decision_tool_name)
+
+                if not tool_func:
+                    self.logger.warning(
+                        f"Herramienta {decision_tool_name} no disponible en tools_map"
+                    )
+                    continue
+                                
                 # Registrar llamada a herramienta antes de ejecutarla (§14)
                 if self.metrics_logger:
-                    self.metrics_logger.log("tool_call", {"tool": decision.tool_name, "iteration": iteration})
-                
+                    self.metrics_logger.log(
+                        "tool_call",
+                        {
+                            "tool": decision_tool_name,
+                            "iteration": iteration
+                        }
+                    )                
                 tool_exec_start = time.time()
 
                 try:
                     # Ejecutar la herramienta real
                     result = tool_func(
-                        step.args if hasattr(step, 'args') else {},
+                        decision_args,
                         permission='default',
                         risk_level='low'
                     )
-                    
+                    print(f"[TRACE] TOOL RESULT: {result}")
                     tool_elapsed = time.time() - tool_exec_start
                     
                     # Registrar latencia de cada tool call (§14)
@@ -239,7 +292,7 @@ class Orchestrator:
 
                     if self.metrics_logger:
                         self.metrics_logger.log("tool_error", {
-                            "tool": decision.tool_name, 
+                            "tool": decision_tool_name,
                             "error": str(e),
                             "iteration": iteration
                         })

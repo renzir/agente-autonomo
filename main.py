@@ -50,14 +50,9 @@ async def _print_response(response):
     if isinstance(response, AsyncIterable):
         print("\n", end="", flush=True)
 
-        import time
-
         async for chunk, is_final in response:
             if chunk:
-                print(
-                    f"\n[{time.perf_counter():.3f}] CHUNK: {chunk!r}",
-                    flush=True
-                )
+                print(chunk, end="", flush=True)
 
         print()
         return

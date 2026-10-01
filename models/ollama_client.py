@@ -77,7 +77,7 @@ class OllamaClient:
             await self._client.aclose()
 
     # ------------------------------------------------------------------ API wrappers
-    
+        
     async def chat_stream(
         self,
         messages: list[dict[str, str]],
@@ -86,56 +86,57 @@ class OllamaClient:
         **params: Any,
     ) -> AsyncGenerator[tuple[str, bool], None]:
         """Envía un chat con streaming a la API /api/chat.
-        
+
         Yields:
             Tuple de (chunk_text, is_final) donde:
             - chunk_text: El texto del chunk actual
             - is_final: Boolean indicando si es el último chunk
         """
         import json
-        
+
         client = await self._get_client()
         payload: dict[str, Any] = {
             "model": model or self.model_name or "",
             "messages": messages,
             "stream": True,
         }
-        
+
         if tools:
             payload["tools"] = tools
-        
+
         payload.update(params)
 
-        response = await client.post("/api/chat", json=payload)
+        request = client.build_request("POST", "/api/chat", json=payload)
+        response = await client.send(request, stream=True)
         response.raise_for_status()
-        
+
         full_content = ""
-        
+
         async for line in response.aiter_lines():
             if not line:
                 continue
-            
+
             try:
                 data = json.loads(line)
-                
+
                 message = data.get("message", {})
                 content = message.get("content", "")
                 is_final = data.get("done", False)
-                
+
                 full_content += content
-                
+
                 yield (content, is_final)
-                
+
                 if is_final:
                     self._last_prompt_tokens = data.get("prompt_eval_count", 0)
                     self._last_completion_tokens = data.get("eval_count", 0)
-                    
+
             except json.JSONDecodeError:
                 self.logger.warning(f"Línea NDJSON inválida: {line}")
                 continue
-        
-        self._last_stream_content = full_content
 
+        self._last_stream_content = full_content    
+    
     @property
     def last_stream_tokens(self) -> tuple[int, int]:
         """Retorna (prompt_tokens, completion_tokens) del último stream."""

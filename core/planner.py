@@ -2,7 +2,7 @@
 core/planner.py - Tarea PARTE 2/5: Núcleo del agente
 Divide una tarea compleja en subpasos accionables mediante LLM.
 """
-
+import json
 import logging
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -76,16 +76,70 @@ class Planner:
         # 1. Construir prompt EXPLICITO para forzar JSON
         system_prompt = (
             "Eres un planner de agentes. Tu ÚNICA tarea es devolver un objeto JSON válido. "
-            "NO incluyas explicaciones, texto preámbulo ni markdown. Solo el JSON.\n"
-            "La estructura debe ser exactamente:\n"
+            "NO incluyas explicaciones, texto de preámbulo ni markdown. Solo el JSON.\n\n"
+
+            "REGLAS OBLIGATORIAS:\n"
+            "1. El campo 'tool' SOLO puede contener uno de estos valores exactos:\n"
+            "   - \"create_file\"\n"
+            "   - \"modify_file\"\n"
+            "   - \"read_file\"\n"
+            "   - \"list_files\"\n"
+            "   - \"search\"\n"
+            "   - \"shell\"\n"
+            "   - \"git\"\n"
+            "2. NO inventes nombres de herramientas. "
+            "NO uses valores como \"file_manager\", \"file_writer\", \"write_file\", "
+            "\"file_creator\" ni ningún otro nombre.\n"
+            "3. El campo 'args' debe contener ÚNICAMENTE los argumentos necesarios "
+            "para la herramienta elegida.\n"
+            "4. Para \"create_file\", los argumentos EXACTOS son:\n"
+            "   {\"path\": \"ruta/al/archivo\", \"content\": \"contenido\"}\n"
+            "5. Para \"modify_file\", los argumentos deben usar 'path' y los campos "
+            "necesarios para modificar el archivo.\n"
+            "6. Para \"read_file\", usa:\n"
+            "   {\"path\": \"ruta/al/archivo\"}\n"
+            "7. Para \"list_files\", usa los argumentos definidos para listar archivos.\n"
+            "8. Para \"search\", usa 'pattern' y los demás argumentos necesarios.\n"
+            "9. Para \"shell\", usa únicamente los argumentos necesarios para ejecutar "
+            "el comando.\n"
+            "10. Si una tarea requiere una herramienta pero no conoces con seguridad "
+            "sus argumentos, NO inventes nombres de argumentos. Usa únicamente los "
+            "argumentos definidos por este contrato.\n\n"
+
+            "La estructura debe ser EXACTAMENTE:\n"
             "{\n"
             '  "steps": [\n'
-            '    {"id": 1, "description": "...", "depends_on": [], "tool": "", "args": {}, "expected_output": "..."}\n'
-            "  ],\n"
+            '    {\n'
+            '      "id": 1,\n'
+            '      "description": "...",\n'
+            '      "depends_on": [],\n'
+            '      "tool": "create_file",\n'
+            '      "args": {"path": "...", "content": "..."},\n'
+            '      "expected_output": "..."\n'
+            '    }\n'
+            '  ],\n'
             '  "estimated_tokens": 0,\n'
             '  "max_iterations": 1\n'
-            "}\n"
-            "Si no puedes planificar, devuelve: {\"steps\": [], \"estimated_tokens\": 0, \"max_iterations\": 0}"
+            "}\n\n"
+
+            "Ejemplo válido para crear un archivo:\n"
+            "{\n"
+            '  "steps": [\n'
+            '    {\n'
+            '      "id": 1,\n'
+            '      "description": "Crear el archivo solicitado",\n'
+            '      "depends_on": [],\n'
+            '      "tool": "create_file",\n'
+            '      "args": {"path": "hola.txt", "content": "estoy probando"},\n'
+            '      "expected_output": "Archivo creado correctamente"\n'
+            '    }\n'
+            '  ],\n'
+            '  "estimated_tokens": 0,\n'
+            '  "max_iterations": 1\n'
+            "}\n\n"
+
+            "Si no puedes planificar la tarea, devuelve exactamente:\n"
+            '{"steps": [], "estimated_tokens": 0, "max_iterations": 0}'
         )
         
         user_prompt = f"Tarea a realizar: {task}\nContexto disponible: {context or 'Ninguno'}"
@@ -93,41 +147,44 @@ class Planner:
         # 2. Llamar al LLM ASINCRONAMENTE usando chat() (ya que generate_completion no existe)
         try:
             print("[TRACE] PLANNER -> OLLAMA")
+
             response_dict = await self.llm_client.chat(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.1, # Temperatura muy baja para ser preciso con el JSON
+                temperature=0.1,
                 max_tokens=1024
             )
-            
-            # 3. Extraer el contenido de texto del response
+
+            print("[TRACE] PLANNER <- OLLAMA")
+            print(f"[TRACE] PLANNER RESPONSE TYPE: {type(response_dict)}")
+            print(f"[TRACE] PLANNER RESPONSE: {response_dict}")
+
             if isinstance(response_dict, dict):
-                content = response_dict.get("message", {}).get("content", "") or response_dict.get("content", "")
+                content = (
+                    response_dict.get("message", {}).get("content", "")
+                    or response_dict.get("content", "")
+                )
             else:
                 content = str(response_dict)
 
-            # 4. Limpiar posibles marcas de markdown (```json ... ```) que el LLM a veces añade
+            print(f"[TRACE] PLANNER RAW CONTENT: {content}")
+
             if content.startswith("```"):
                 lines = content.split("\n")
-                # Eliminar la primera línea (```json o ```) y la última (```)
                 if len(lines) > 1:
                     lines.pop(0)
                     if lines[-1].strip() == "}":
                         lines.pop(-1)
                     content = "\n".join(lines)
-            
-            # 5. Parsear JSON
-            import json
+
             plan_data = json.loads(content)
-            
-            # Validar que tenga la estructura básica
+
             if 'steps' not in plan_data:
                 raise ValueError("El JSON devuelto no tiene la clave 'steps'")
 
-            return PlannerResponse(**plan_data)
-            
+            return PlannerResponse(**plan_data)   
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             self.logger.error(f"Error al parsear respuesta del planner (JSON inválido): {e} | Respuesta cruda: {content[:100]}")
             # Fallback seguro en lugar de romper
