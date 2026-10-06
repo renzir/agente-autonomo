@@ -68,7 +68,7 @@ class Planner:
             return response
         except Exception as e:
             self.logger.error(f"Error al planificar con LLM: {str(e)}")
-            return self._default_planning(task)
+            raise
 
     async def _llm_plan(self, task: str, context: Optional[str] = None) -> PlannerResponse:
         """Genera un plan usando el cliente LLM. CORREGIDO PARA DEVOLVER JSON."""
@@ -76,45 +76,28 @@ class Planner:
         # 1. Construir prompt EXPLICITO para forzar JSON
         system_prompt = (
             "Eres un planner de agentes. Tu ÚNICA tarea es devolver un objeto JSON válido. "
-            "NO incluyas explicaciones, texto de preámbulo ni markdown. Solo el JSON.\n\n"
+            "NO incluyas explicaciones, markdown ni texto fuera del JSON.\n\n"
 
-            "REGLAS OBLIGATORIAS:\n"
-            "1. El campo 'tool' SOLO puede contener uno de estos valores exactos:\n"
-            "   - \"create_file\"\n"
-            "   - \"modify_file\"\n"
-            "   - \"read_file\"\n"
-            "   - \"list_files\"\n"
-            "   - \"search\"\n"
-            "   - \"shell\"\n"
-            "   - \"git\"\n"
-            "2. NO inventes nombres de herramientas. "
-            "NO uses valores como \"file_manager\", \"file_writer\", \"write_file\", "
-            "\"file_creator\" ni ningún otro nombre.\n"
-            "3. El campo 'args' debe contener ÚNICAMENTE los argumentos necesarios "
-            "para la herramienta elegida.\n"
-            "4. Para \"create_file\", los argumentos EXACTOS son:\n"
-            "   {\"path\": \"ruta/al/archivo\", \"content\": \"contenido\"}\n"
-            "5. Para \"modify_file\", los argumentos deben usar 'path' y los campos "
-            "necesarios para modificar el archivo.\n"
-            "6. Para \"read_file\", usa:\n"
-            "   {\"path\": \"ruta/al/archivo\"}\n"
-            "7. Para \"list_files\", usa los argumentos definidos para listar archivos.\n"
-            "8. Para \"search\", usa 'pattern' y los demás argumentos necesarios.\n"
-            "9. Para \"shell\", usa únicamente los argumentos necesarios para ejecutar "
-            "el comando.\n"
-            "10. Si una tarea requiere una herramienta pero no conoces con seguridad "
-            "sus argumentos, NO inventes nombres de argumentos. Usa únicamente los "
-            "argumentos definidos por este contrato.\n\n"
+            "HERRAMIENTAS VÁLIDAS — usa exactamente estos nombres:\n"
+            "- create_file\n"
+            "- modify_file\n"
+            "- read_file\n"
+            "- list_files\n"
+            "- search_text\n"
+            "- execute_command\n\n"
 
-            "La estructura debe ser EXACTAMENTE:\n"
+            "No inventes herramientas ni uses nombres alternativos como "
+            "search, shell, write_file, file_manager o file_writer.\n\n"
+
+            "FORMATO OBLIGATORIO:\n"
             "{\n"
             '  "steps": [\n'
             '    {\n'
             '      "id": 1,\n'
             '      "description": "...",\n'
             '      "depends_on": [],\n'
-            '      "tool": "create_file",\n'
-            '      "args": {"path": "...", "content": "..."},\n'
+            '      "tool": "nombre_exacto",\n'
+            '      "args": {},\n'
             '      "expected_output": "..."\n'
             '    }\n'
             '  ],\n'
@@ -122,24 +105,19 @@ class Planner:
             '  "max_iterations": 1\n'
             "}\n\n"
 
-            "Ejemplo válido para crear un archivo:\n"
-            "{\n"
-            '  "steps": [\n'
-            '    {\n'
-            '      "id": 1,\n'
-            '      "description": "Crear el archivo solicitado",\n'
-            '      "depends_on": [],\n'
-            '      "tool": "create_file",\n'
-            '      "args": {"path": "hola.txt", "content": "estoy probando"},\n'
-            '      "expected_output": "Archivo creado correctamente"\n'
-            '    }\n'
-            '  ],\n'
-            '  "estimated_tokens": 0,\n'
-            '  "max_iterations": 1\n'
-            "}\n\n"
-
-            "Si no puedes planificar la tarea, devuelve exactamente:\n"
-            '{"steps": [], "estimated_tokens": 0, "max_iterations": 0}'
+            "REGLAS:\n"
+            "1. Cada step debe usar una herramienta válida.\n"
+            "2. Los argumentos de 'args' deben corresponder exactamente a la herramienta elegida.\n"
+            "3. Usa depends_on solo cuando un step dependa de otro.\n"
+            "4. Devuelve SOLO JSON válido.\n"
+            "5. Nunca inventes nombres de archivos, carpetas, rutas ni recursos que no aparezcan en la tarea o en resultados previos de herramientas.\n"
+            "6. Si una tarea requiere conocer primero el contenido de una carpeta o directorio desconocido, el primer step debe ser una herramienta de descubrimiento, normalmente list_files.\n"
+            "7. No generes steps posteriores basados en nombres de archivos, carpetas o recursos que todavía no conoces.\n"
+            "8. No uses nombres ficticios como archivo_ejemplo.conf, test.txt, config.yaml ni ningún otro nombre no proporcionado por el usuario o por una herramienta.\n"
+            "9. Usa exactamente los argumentos definidos para cada herramienta.\n"
+            "   search_text requiere el argumento 'pattern'. No uses 'query'.\n"
+            "10. Cuando el objetivo sea analizar archivos descubiertos dinámicamente, primero descubre los recursos disponibles y utiliza únicamente los nombres obtenidos de los resultados reales.\n"
+            "11. Si todavía no conoces los archivos necesarios para continuar, no los inventes."
         )
         
         user_prompt = f"Tarea a realizar: {task}\nContexto disponible: {context or 'Ninguno'}"
@@ -154,7 +132,9 @@ class Planner:
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.1,
-                max_tokens=1024
+                max_tokens=1024, 
+                think=False,
+                stream=False
             )
 
             print("[TRACE] PLANNER <- OLLAMA")
@@ -191,8 +171,8 @@ class Planner:
             return self._default_planning(task)
         except Exception as e:
             self.logger.error(f"Error crítico en _llm_plan: {str(e)}")
-            return self._default_planning(task)
-        
+            raise   
+
     def _default_planning(self, task: str) -> PlannerResponse:
         """Planificación por defecto para tareas simples."""
         # Para tareas muy simples, un solo paso es suficiente
@@ -214,18 +194,14 @@ class Planner:
         """Valida que el plan sea ejecutable."""
         if not plan.steps:
             return False
-            
-        # Si max_iterations no está configurado (0), validar solo estructura básica
-        if plan.max_iterations > 0 and len(plan.steps) > plan.max_iterations:
-            return False
-        
+
         # Verificar que no haya IDs duplicados entre pasos
         seen_ids = set()
+
         for step in plan.steps:
             if step.id in seen_ids:
                 return False
+
             seen_ids.add(step.id)
-            
+
         return True
-
-

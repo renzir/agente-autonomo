@@ -10,6 +10,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from tools.registry import ToolRegistry
 
 # Agregar el directorio raíz al path para imports relativos
 root_dir = str(Path(__file__).parent.parent)
@@ -103,9 +104,11 @@ class LocalAgent:
             config=self.config
         )
         
-        # Cargar herramientas disponibles incluyendo sandbox config
-        available_tools = self._get_tool_metadata()
-        self.router = Router(tool_registry=available_tools)
+        # Inicializar catálogo central de herramientas
+        self.tool_registry = ToolRegistry()
+
+        # Inyectar el catálogo real en el Router
+        self.router = Router(tool_registry=self.tool_registry)
         
         # Métricas (§14 wiring)
         from metrics.logger import MetricsLogger
@@ -224,40 +227,6 @@ class LocalAgent:
         return endpoint_config.get('endpoint', 'http://localhost:11434')
 
 
-    def _get_tool_metadata(self) -> Dict[str, ToolMetadata]:
-        """Obtiene metadatos de herramientas desde el registry."""
-        # Implementación por defecto segura para pruebas y dev
-        if hasattr(self.model_registry, 'get_tool_metadata'):
-            tools = {}
-            for tool_name in ['filesystem', 'search', 'shell', 'git']:
-                try:
-                    metadata = self.model_registry.get_tool_metadata(tool_name)
-                    tools[tool_name] = metadata
-                except (AttributeError, KeyError):
-                    continue
-            if tools:
-                return tools
-        
-        # Defaults seguros si no hay registry completo
-        return {
-            'filesystem': ToolMetadata(
-                name='filesystem', description='Operaciones de archivos y directorios',
-                permission='write', risk='medium'
-            ),
-            'search': ToolMetadata(
-                name='search', description='Búsqueda en internet o base de conocimiento',
-                permission='read', risk='low'
-            ),
-            'shell': ToolMetadata(
-                name='shell', description='Ejecutar comandos del sistema operativo',
-                permission='execute', risk='high'
-            ),
-            'git': ToolMetadata(
-                name='git', description='Operaciones con repositorios Git',
-                permission='execute', risk='medium'
-            )
-        }
-
     async def _handle_conversational_mode(self, user_input: str):
         print("[TRACE] CONVERSATIONAL START")
 
@@ -289,30 +258,35 @@ class LocalAgent:
         Se activa por defecto (sin prefijo) o si se especifica '/agente'.
         Preserva toda la lógica existente de herramientas y seguridad.
         """
+
         # Crear nuevo estado de sesión para esta ejecución
         state = self.state_factory()
         self.current_session = state
-        
-        # Construir herramientas stub disponibles (lógica original intacta)
+
+        # Construir herramientas disponibles
         tools_map = self._get_tools_map()
-        
+
         response = await self.orchestrator.run(
-        task=user_input,
-        state=state,
-        tools_map=tools_map,
-        logger_callback=self.metrics_logger  # Métricas inyectadas (§12)
-    )
-    
-         # === AGREGAR ESTE BLOQUE DE VALIDACIÓN ===
+            task=user_input,
+            state=state,
+            tools_map=tools_map,
+            logger_callback=self.metrics_logger
+        )
+
+        # Validar que el Orchestrator haya devuelto una respuesta
         if response is None:
             self.logger.error(
-                f"Orchestrator devolvió None para tarea: {user_input[:50]}... "
-                f"Generando respuesta fallback."
-        )
-        return Message(
-            role="assistant",
-            content=f"[SISTEMA] No se pudo procesar la solicitud. Intente nuevamente más tarde."
-        )
+                f"Orchestrator devolvió None para tarea: "
+                f"{user_input[:50]}... Generando respuesta fallback."
+            )
+
+            return Message(
+                role="assistant",
+                content="[SISTEMA] No se pudo procesar la solicitud. Intente nuevamente más tarde."
+            )
+
+        # Devolver la respuesta generada por el Orchestrator
+        return response
 
     def _get_tools_map(self) -> Dict[str, Callable]:
         """

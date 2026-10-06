@@ -88,71 +88,54 @@ class Router:
     def __init__(self, tool_registry: Dict[str, ToolMetadata] = None):
         self.logger = logging.getLogger(__name__)
         self.tool_registry = tool_registry or {}
-        # Prioridad de fallback solo para selección inicial, no para predicción temprana
-        self.priority_order = ['filesystem', 'shell', 'search', 'git'] 
-    
-    def route(self, intention: str, available_tools: Dict[str, ToolMetadata] = None) -> RouterDecision:
-        """
-        Decide qué herramienta usar.
-        
-        Simplificado: No usa keywords complejas para predecir la herramienta.
-        Si hay una intención clara o contexto previo, podría usarse, pero por defecto
-        devuelve un tool_name basado en prioridad/simple match para mantener compatibilidad
-        sin adivinar.
-        
-        Args:
-            intention: Texto de la intención (ya procesado opcionalmente por IntentClassifier)
-            available_tools: Diccionario de herramientas disponibles
-            
-        Returns:
-            RouterDecision con la herramienta elegida (por prioridad o default)
-        """
+
+    def route(self, step) -> RouterDecision:
         print("[TRACE] ROUTER START")
-        tools_to_use = available_tools or self.tool_registry
-        
-        if not tools_to_use:
+
+        tool_name = step.tool
+        args = step.args or {}
+
+        if not tool_name:
             return RouterDecision(
                 tool_name="",
                 confidence=0.0,
-                reason="No hay herramientas disponibles"
-            )
-        
-        # Simplificación: Ya no hacemos keyword matching complejo aquí.
-        # Devolvemos la herramienta de mayor prioridad disponible para mantener el flujo.
-        # La selección real se hará más tarde en el agente.
-        decision = self._simple_match(tools_to_use)
-        
-        self.logger.debug(f"Decisión del router simplificado: {decision.tool_name}")
-        print(f"[TRACE] ROUTER DECISION: {decision}")
-        return decision
-    
-    def _simple_match(self, available_tools: Dict[str, ToolMetadata]) -> RouterDecision:
-        """
-        Selección simple por prioridad. Elimina la lógica de adivinanza.
-        """
-        # 1. Intentar encontrar una herramienta en el orden de prioridad estándar
-        for tool_name in self.priority_order:
-            if tool_name in available_tools:
-                return RouterDecision(
-                    tool_name=tool_name,
-                    confidence=0.5, # Confianza base ya que no hay predicción semántica
-                    reason="Selección por prioridad de fallback"
-                )
-        
-        # 2. Si ninguna está en la lista de prioridad, tomar la primera disponible
-        for tool_name in available_tools.keys():
-            return RouterDecision(
-                tool_name=tool_name,
-                confidence=0.3,
-                reason="Selección por disponibilidad (fallback)"
+                reason=f"El step {step.id} no especifica herramienta"
             )
 
-        # 3. Si no hay absolutamente nada
-        return RouterDecision(
-            tool_name="",
-            confidence=0.0,
-            reason="No hay herramientas disponibles en el registry"
-        )
+        try:
+            tool = self.tool_registry.get_tool(tool_name)
+
+            self.tool_registry.validate_input(tool_name, args)
+
+            decision = RouterDecision(
+                tool_name=tool_name,
+                args=args,
+                confidence=1.0,
+                reason=f"Herramienta '{tool_name}' resuelta desde ToolRegistry"
+            )
+
+            self.logger.debug(
+                f"Router resolvió step {step.id}: {tool_name}"
+            )
+
+            return decision
+
+        except KeyError:
+            return RouterDecision(
+                tool_name="",
+                args={},
+                confidence=0.0,
+                reason=f"Herramienta '{tool_name}' no existe en ToolRegistry"
+            )
+
+        except ValueError as e:
+            return RouterDecision(
+                tool_name="",
+                args={},
+                confidence=0.0,
+                reason=f"Argumentos inválidos para '{tool_name}': {e}"
+            )
+    
     
     def update_registry(self, tools: Dict[str, ToolMetadata]):
         """Actualiza el registry de herramientas."""

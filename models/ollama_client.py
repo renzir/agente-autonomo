@@ -146,75 +146,150 @@ class OllamaClient:
         )
 
 
-    
+        
     async def chat(
         self,
         messages: list[dict[str, str]],
         model: Optional[str] = None,
         tools: Optional[list[dict[str, Any]]] = None,
-        stream: bool = False,  # AGREGA ESTE PARÁMETRO
+        stream: bool = False,
         **params: Any,
-    ) -> dict[str, Any] | AsyncGenerator[tuple[str, bool], None]:  # MODIFICA EL TIPO DE RETORNO
+    ) -> dict[str, Any] | AsyncGenerator[tuple[str, bool], None]:
         import time
-        t = time.perf_counter()
+
+        t_start = time.perf_counter()
+
         print("[TRACE] OLLAMA START")
-        # AGREGA ESTO AL INICIO DEL MÉTODO:
+
         if stream:
-            return self.chat_stream(messages, model=model, tools=tools, **params)
-              
+            return self.chat_stream(
+                messages,
+                model=model,
+                tools=tools,
+                **params
+            )
+
         client = await self._get_client()
+
         payload: dict[str, Any] = {
             "model": model or self.model_name or "",
             "messages": messages,
         }
-        
-        # CORREGIDO §Tool calling: Incluir tools en el payload si se proporcionan
+
         if tools:
             payload["tools"] = tools
-        
+
         payload.update(params)
+
+        print("[TRACE] OLLAMA PAYLOAD:")
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
 
         response = await client.post("/api/chat", json=payload)
         response.raise_for_status()
-        
-        # Ollama /api/chat puede devolver NDJSON incluso cuando stream=False.
-        # Intentamos parsear como un único JSON primero (para compatibilidad con stream=False)
+
+        # Ollama puede devolver JSON único o NDJSON.
         try:
             result = response.json()
+
+            elapsed = time.perf_counter() - t_start
+
+            # Métricas proporcionadas por Ollama
+            prompt_tokens = result.get("prompt_eval_count", 0)
+            output_tokens = result.get("eval_count", 0)
+
+            prompt_duration_ns = result.get("prompt_eval_duration", 0)
+            output_duration_ns = result.get("eval_duration", 0)
+
+            prompt_duration = prompt_duration_ns / 1_000_000_000
+            output_duration = output_duration_ns / 1_000_000_000
+
+            prompt_tps = (
+                prompt_tokens / prompt_duration
+                if prompt_duration > 0
+                else 0
+            )
+
+            output_tps = (
+                output_tokens / output_duration
+                if output_duration > 0
+                else 0
+            )
+
+            print(
+                f"[TRACE] OLLAMA END: {elapsed:.2f}s | "
+                f"prompt={prompt_tokens} tok ({prompt_duration:.2f}s, "
+                f"{prompt_tps:.2f} tok/s) | "
+                f"output={output_tokens} tok ({output_duration:.2f}s, "
+                f"{output_tps:.2f} tok/s)"
+            )
+
             return result
+
         except json.JSONDecodeError:
-            # Si falla, significa que recibió múltiples líneas JSON (NDJSON)
-            # En este caso, reconstruimos la respuesta final concatenando el contenido
+            # Ollama devolvió múltiples líneas JSON (NDJSON)
             full_content = ""
-            final_response = {}
-            
+            final_response: dict[str, Any] = {}
+
             async for line in response.aiter_lines():
                 if not line:
                     continue
-                
+
                 try:
                     data = json.loads(line)
-                    
-                    # Acumular el contenido del mensaje
+
                     message = data.get("message", {})
                     content = message.get("content", "")
                     full_content += content
-                    
-                    # Guardar la respuesta completa (la última línea es la definitiva)
+
                     final_response = data
-                    
+
                 except json.JSONDecodeError:
                     continue
-            
-            # Inyectar el contenido completo en la respuesta final
+
             if final_response:
                 if "message" not in final_response:
                     final_response["message"] = {}
+
                 final_response["message"]["content"] = full_content
 
-            print(f"[TRACE] OLLAMA END: {time.perf_counter() - t:.2f}s")
-                
-            return final_response if final_response else {"error": "No se pudo parsear la respuesta de Ollama"}
+            elapsed = time.perf_counter() - t_start
+
+            prompt_tokens = final_response.get("prompt_eval_count", 0)
+            output_tokens = final_response.get("eval_count", 0)
+
+            prompt_duration_ns = final_response.get("prompt_eval_duration", 0)
+            output_duration_ns = final_response.get("eval_duration", 0)
+
+            prompt_duration = prompt_duration_ns / 1_000_000_000
+            output_duration = output_duration_ns / 1_000_000_000
+
+            prompt_tps = (
+                prompt_tokens / prompt_duration
+                if prompt_duration > 0
+                else 0
+            )
+
+            output_tps = (
+                output_tokens / output_duration
+                if output_duration > 0
+                else 0
+            )
+
+            print(
+                f"[TRACE] OLLAMA END: {elapsed:.2f}s | "
+                f"prompt={prompt_tokens} tok ({prompt_duration:.2f}s, "
+                f"{prompt_tps:.2f} tok/s) | "
+                f"output={output_tokens} tok ({output_duration:.2f}s, "
+                f"{output_tps:.2f} tok/s)"
+            )
+
+            return (
+                final_response
+                if final_response
+                else {
+                    "error": "No se pudo parsear la respuesta de Ollama"
+                }
+            )
     
     async def list_models(self) -> dict[str, Any]:
         """Lista los modelos instalados en Ollama (/api/tags)."""

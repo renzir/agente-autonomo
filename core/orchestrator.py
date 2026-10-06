@@ -105,6 +105,7 @@ class Orchestrator:
         total_tool_calls_made = 0
         plan_result = None
         iteration = 0
+        intention = None
         
         for iteration in range(1, self.max_iterations + 1):
             self.logger.info(f"Iteración {iteration}/{self.max_iterations}")
@@ -122,124 +123,144 @@ class Orchestrator:
             # ====================================================================
             # PASO 1: UNDERSTAND - Extraer intención del usuario
             # ====================================================================
-            
-            print("[TRACE] ORCHESTRATOR -> UNDERSTAND")
-            state.set_phase('understand')            
-            intention = await self._understand(state, stream_callback=stream_callback)
 
-            print("[TRACE] ORCHESTRATOR <- UNDERSTAND")
+            if intention is None:
+                print("[TRACE] ORCHESTRATOR -> UNDERSTAND")
+                state.set_phase('understand')
+                intention = await self._understand(
+                    state,
+                    stream_callback=stream_callback
+                )
+                print("[TRACE] ORCHESTRATOR <- UNDERSTAND")
             # ====================================================================
-            # PASO 2: PLANIFICACIÓN (Solo si no hay un plan previo de iteraciones anteriores)
-            # En esta simplificación, el Planner se llama si es la primera pasada o si 
-            # necesitamos más pasos. Aquí asumimos un loop de "Plan-Execute-Respond" por simplicidad.
+            # PASO 2: PLANIFICACIÓN
             # ====================================================================
             state.set_phase('plan')
             
             # Obtener contexto para el planner
-            context_messages = None
+            context_parts = []
+
             if len(state.messages) > 0:
                 start_idx = max(0, len(state.messages) - 5)
-                context_messages = [msg.content for msg in state.messages[start_idx:]]
-                context_str = "\n".join(context_messages) if context_messages else None
-            
-            # Llamamos al planner para obtener pasos. Si ya teníamos un plan y pasos pendientes,
-            # podríamos reutilizarlo, pero para simplificar y evitar ciclos redundantes, 
-            # pedimos un nuevo plan basado en la intención actual y resultados previos si los hay.
+                context_messages = [
+                    msg.content for msg in state.messages[start_idx:]
+                ]
+
+                if context_messages:
+                    context_parts.append(
+                        "Mensajes recientes:\n" +
+                        "\n".join(context_messages)
+                    )
+
+            # Incluir resultados reales de herramientas ejecutadas previamente.
+            # Esto permite que el Planner conozca archivos, rutas y datos
+            # descubiertos durante una iteración anterior.
+            results_cache = getattr(state, 'results_cache', {})
+
+            if results_cache:
+                tool_results = []
+
+                for step_id, result in results_cache.items():
+                    tool_results.append(
+                        f"Paso {step_id}: {result}"
+                    )
+
+                context_parts.append(
+                    "Resultados de herramientas ejecutadas:\n" +
+                    "\n".join(tool_results)
+                )
+
+            context_str = (
+                "\n\n".join(context_parts)
+                if context_parts
+                else None
+            )
+
+            # Llamamos al planner para obtener pasos.
+            # Si plan_result es None, se genera una nueva planificación
+            # utilizando también los resultados obtenidos previamente.
             if not plan_result:
                 print("[TRACE] ORCHESTRATOR -> PLANNER")
-                plan_result = await self.planner.plan(intention, context_str)
+
+                try:
+                    plan_result = await self.planner.plan(
+                        intention,
+                        context_str
+                    )
+
+                except Exception as e:
+                    self.logger.error(f"Error en Planner: {e}")
+                    state.set_phase('error')
+                    raise
+
                 print("[TRACE] ORCHESTRATOR <- PLANNER")
 
             # Validar que el plan no esté vacío
             if not plan_result or not hasattr(plan_result, 'steps') or len(plan_result.steps) == 0:
-                # Si no hay pasos, generamos respuesta simple directamente
                 state.set_phase('respond')
                 self.logger.info("No steps in plan. Generating simple response.")
-                response = await self._generate_simple_response(state, intention, stream_callback=stream_callback)
+                response = await self._generate_simple_response(
+                    state,
+                    intention,
+                    stream_callback=stream_callback
+                )
                 break
             
             # Validar plan estructuralmente
             if not self.planner.validate_plan(plan_result):
                 self.logger.error("Plan inválido según validación estructural")
                 break
-            
-            # ====================================================================
+
+                        # ====================================================================
             # PASO 3: EJECUCIÓN DE HERRAMIENTAS (Simplificado)
             # Ejecutamos los pasos del plan devueltos por el Planner.
             # No usamos keywords para decidir, confiamos en lo que el Planner dijo.
             # ====================================================================
             state.set_phase('execute')
-            
+
             tools_executed_in_iteration = False
-            
+            requires_replan = False
+
             for step_idx, step in enumerate(plan_result.steps[:self.max_tool_calls]):
-                
+
                 # Límite de tool calls totales (§13)
                 if total_tool_calls_made >= self.max_tool_calls:
-                    self.logger.warning(f"Límite de {self.max_tool_calls} tool calls alcanzado.")
+                    self.logger.warning(
+                        f"Límite de {self.max_tool_calls} tool calls alcanzado."
+                    )
                     break
-                
-                # Seleccionar herramienta:
-                # 1. Usar directamente la herramienta indicada por el Planner si es válida.
-                # 2. Usar Router únicamente como fallback si no existe una correspondencia directa.
+
+                # ====================================================================
+                # ROUTER - Resolver el Step contra el catálogo de herramientas
+                # ====================================================================
                 state.set_phase('route')
 
-                planner_tool = getattr(step, 'tool', '') or ''
-                planner_args = getattr(step, 'args', {}) or {}
+                decision = self.router.route(step)
 
-                # Adaptación de nombres semánticos del Planner a herramientas reales.
-                tool_aliases = {
-                    'write_file': ('filesystem', 'create_file'),
-                    'create_file': ('filesystem', 'create_file'),
-                    'file_writer': ('filesystem', 'create_file'),
-                    'modify_file': ('filesystem', 'modify_file'),
-                    'read_file': ('filesystem', 'read_file'),
-                    'list_files': ('filesystem', 'list_files'),
-                    
-                }
-                if planner_tool in tool_aliases:
-                    tool_name, operation = tool_aliases[planner_tool]
+                print(f"[TRACE] ROUTER DECISION: {decision}")
 
-                    decision_tool_name = tool_name
-                    decision_args = {
-                        'operation': operation,
-                        **planner_args,
-                    }
-
-                    # Adaptar filename -> path para create_file.
-                    if operation == 'create_file' and 'filename' in decision_args:
-                        decision_args['path'] = decision_args.pop('filename')
-
-                    print(
-                        f"[TRACE] PLANNER TOOL RESOLVED: "
-                        f"{planner_tool} -> {decision_tool_name} "
-                        f"args={decision_args}"
-                    )
-
-                else:
-                    # Fallback: si el Planner no conoce una herramienta directamente,
-                    # dejamos que el Router intente resolverla.
-                    print("[TRACE] PLANNER TOOL NOT RESOLVED -> ROUTER")
-
-                    decision = self.router.route(
-                        intention,
-                        available_tools=tools_map
-                    )
-
-                    if not decision.tool_name:
-                        continue
-
-                    decision_tool_name = decision.tool_name
-                    decision_args = decision.args or {}
-
-                tool_func = tools_map.get(decision_tool_name)
-
-                if not tool_func:
+                if not decision.tool_name:
                     self.logger.warning(
-                        f"Herramienta {decision_tool_name} no disponible en tools_map"
+                        f"Router no pudo resolver el step {step.id}: {step.description}"
                     )
                     continue
-                                
+
+                decision_tool_name = decision.tool_name
+                decision_args = decision.args or {}
+
+                # Obtener la herramienta real desde el ToolRegistry
+                try:
+                    tool_entry = self.router.tool_registry.get_tool(
+                        decision_tool_name
+                    )
+                    tool_func = tool_entry["fn"]
+
+                except KeyError:
+                    self.logger.warning(
+                        f"Herramienta {decision_tool_name} no existe en ToolRegistry"
+                    )
+                    continue
+
                 # Registrar llamada a herramienta antes de ejecutarla (§14)
                 if self.metrics_logger:
                     self.metrics_logger.log(
@@ -248,7 +269,8 @@ class Orchestrator:
                             "tool": decision_tool_name,
                             "iteration": iteration
                         }
-                    )                
+                    )
+
                 tool_exec_start = time.time()
 
                 try:
@@ -258,9 +280,11 @@ class Orchestrator:
                         permission='default',
                         risk_level='low'
                     )
+
                     print(f"[TRACE] TOOL RESULT: {result}")
+
                     tool_elapsed = time.time() - tool_exec_start
-                    
+
                     # Registrar latencia de cada tool call (§14)
                     if self.metrics_logger:
                         self._tool_latencies.append(tool_elapsed)
@@ -268,149 +292,202 @@ class Orchestrator:
                     # OBSERVE RESULT (incorporar al estado/historial)
                     state.set_phase('observe')
                     observation = self._observe_result(result)
-                    
+
                     # Incorporar resultado al historial para la respuesta siguiente
                     state.results_cache[step.id] = observation
-                    
+
                     # Incrementar contador de tool_calls reales ejecutados (§13)
                     total_tool_calls_made += 1
                     tools_executed_in_iteration = True
-                    
+
+                    # Si acabamos de descubrir el contenido de una carpeta,
+                    # necesitamos volver al Planner con ese resultado real.
+                    if decision_tool_name == "list_files":
+                        requires_replan = True
+
                     if logger_callback:
-                        logger_callback.log(f"iteration_{iteration}_verification", {
-                            'step': step.id,
-                            'passed': True
-                        })
-                    
+                        logger_callback.log(
+                            f"iteration_{iteration}_verification",
+                            {
+                                'step': step.id,
+                                'passed': True
+                            }
+                        )
+
                     self.metrics.verification_passes += 1
-                    
+
                 except Exception as e:
                     tool_elapsed = time.time() - tool_exec_start
-                    
+
                     if self.metrics_logger:
                         self._tool_latencies.append(tool_elapsed)
 
                     if self.metrics_logger:
-                        self.metrics_logger.log("tool_error", {
-                            "tool": decision_tool_name,
-                            "error": str(e),
-                            "iteration": iteration
-                        })
+                        self.metrics_logger.log(
+                            "tool_error",
+                            {
+                                "tool": decision_tool_name,
+                                "error": str(e),
+                                "iteration": iteration
+                            }
+                        )
 
-                    self.logger.error(f"Error ejecutando herramienta: {str(e)}")
+                    self.logger.error(
+                        f"Error ejecutando herramienta: {str(e)}"
+                    )
+
                     # Registrar error en el historial para la respuesta final
-                    state.results_cache[step.id] = {"status": "error", "error": str(e)}
+                    state.results_cache[step.id] = {
+                        "status": "error",
+                        "error": str(e)
+                    }
+
                     continue
-            
             # ====================================================================
-            # PASO 4: GENERAR RESPUESTA FINAL
-            # Si ejecutamos herramientas o no hay más pasos, generamos la respuesta final.
+            # PASO 4: FINALIZAR O CONTINUAR
+            # Solo finalizamos cuando no quedan pasos pendientes y no
+            # necesitamos una nueva planificación.
             # ====================================================================
-            if tools_executed_in_iteration or step_idx >= len(plan_result.steps) - 1:
-                response = await self._generate_response(state, stream_callback=stream_callback)
+
+            # Si acabamos de descubrir archivos/directorios, debemos volver
+            # al Planner utilizando los resultados reales obtenidos.
+            if requires_replan:
+                print("[TRACE] ORCHESTRATOR -> REPLAN")
+                plan_result = None
+                continue
+
+            is_last_step = step_idx >= len(plan_result.steps) - 1
+
+            if is_last_step:
+                # Ya no quedan steps pendientes.
+                # Si el resultado de la última herramienta es directamente
+                # presentable, no hacemos otra llamada al LLM.
+                if tools_executed_in_iteration:
+                    response = self._generate_direct_response(state)
+                else:
+                    self.logger.warning(
+                        "El último step no pudo ejecutarse. Generando respuesta final."
+                    )
+                    response = await self._generate_response(
+                        state,
+                        stream_callback=stream_callback
+                    )
+
                 break
-            
-            # Si el plan tenía pasos pero no se pudo ejecutar ninguno (ej. router fallido), 
-            # forzamos una respuesta para evitar loop infinito
+
+            # Todavía quedan steps pendientes.
+            # Si no se ejecutó ninguna herramienta en esta iteración,
+            # no podemos avanzar de forma segura.
             if not tools_executed_in_iteration:
-                self.logger.warning("Ninguna herramienta se ejecutó en este paso. Finalizando.")
-                response = await self._generate_response(state, stream_callback=stream_callback)
+                self.logger.warning(
+                    "Ninguna herramienta se ejecutó en el step actual. "
+                    "No se puede continuar el plan."
+                )
+                response = await self._generate_response(
+                    state,
+                    stream_callback=stream_callback
+                )
                 break
-        
-        # Finalizar si no hay respuesta aún (fallback)
-        if response is None:
-            self.logger.warning("Límite de iteraciones alcanzado sin finalizar la tarea exitosamente.")
-            response = await self._generate_response(state, stream_callback=stream_callback)
-        
-        # Registrar métricas finales (§14)
-        total_time = time.time() - loop_start_time
-        avg_tool_latency = 0.0
-        if hasattr(self, '_tool_latencies') and self._tool_latencies:
-            avg_tool_latency = sum(self._tool_latencies) / len(self._tool_latencies)
 
-        final_metrics_bundle = {
-            "latency": round(total_time, 3),
-            "iterations_used": iteration,
-            "total_tool_calls_executed": total_tool_calls_made,
-            "avg_tool_latency_sec": round(avg_tool_latency, 4),
-            "verification_passes": self.metrics.verification_passes,
-            "verification_fails": self.metrics.verification_fails
-        }
+            # Si llegamos al límite de iteraciones sin finalizar,
+            # generamos una respuesta de fallback.
+            if response is None:
+                self.logger.warning(
+                    "Límite de iteraciones alcanzado sin finalizar "
+                    "la tarea exitosamente."
+                )
+                response = await self._generate_response(
+                    state,
+                    stream_callback=stream_callback
+                )
 
-        if self.metrics_logger:
-            self.metrics_logger.log("orchestration_summary", final_metrics_bundle)
+            # ====================================================================
+            # MÉTRICAS
+            # ====================================================================
 
-        return response 
-    # ====================================================================
-    # Métodos auxiliares del agente loop (§12, §13)
-    # ====================================================================
-    
-    async def _understand(self, state: SessionState, stream_callback: Optional[Callable[[str, bool], None]] = None) -> str:
-        """UNDERSTAND: Interpreta la intención del usuario. Soporta streaming."""
-        import asyncio
+            self.metrics.tool_calls_count = total_tool_calls_made
+
+        return response        
+
+    async def _understand(
+        self,
+        state: SessionState,
+        stream_callback: Optional[Callable[[str, bool], None]] = None
+    ) -> str:
+        """UNDERSTAND: Extrae una intención mínima para el Planner."""
+
         if not self.llm_client:
             return "Generic intent for now"
 
         system_prompt = (
-            "Eres un analizador de intenciones para un agente autónomo. "
-            "Tu tarea es extraer una descripción concisa y clara de la intención del usuario "
-            "a partir de su mensaje. Devuelve SOLO la descripción de la intención, sin explicaciones adicionales."
+            "Extrae la intención del usuario para un agente de programación. "
+            "Responde SOLO con una frase muy breve, máximo 15 palabras. "
+            "No expliques ni describas razonamiento. "
+            "Conserva nombres de archivos, rutas, comandos y datos importantes."
         )
 
         last_user_msg = None
+
         for msg in reversed(state.messages):
-            if msg.role == 'user':
+            if msg.role == "user":
                 last_user_msg = msg.content
                 break
 
         if not last_user_msg:
             return "No user input found"
 
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": last_user_msg}
+        ]
+
         try:
             if stream_callback:
                 full_intent = ""
+
                 chat_generator = await self.llm_client.chat(
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"Mensaje del usuario: {last_user_msg}"}
-                    ],
-                    temperature=0.1,
-                    max_tokens=256,
-                    stream=True
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=32,
+                    stream=True, 
+                    
                 )
-                
+
                 async for chunk, is_final in chat_generator:
                     if chunk:
                         full_intent += chunk
                         stream_callback(chunk, is_final)
 
-                return full_intent.strip() if full_intent else "Generic intent for now"
+                return (
+                    full_intent.strip()
+                    if full_intent.strip()
+                    else "Generic intent for now"
+                )
 
-            # Camino no-streaming (existente lógica)
-            raw_response = self.llm_client.chat(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Mensaje del usuario: {last_user_msg}"}
-                ],
-                temperature=0.1,
-                max_tokens=256
+            response = await self.llm_client.chat(
+                messages=messages,
+                temperature=0.0,
+                max_tokens=32,
+                stream=False, 
+                think=False
             )
-            
-            if asyncio.iscoroutine(raw_response):
-                response = await raw_response
-            else:
-                response = raw_response
 
             if isinstance(response, dict):
-                content = response.get("message", {}).get("content", "") or response.get("content", "")
+                content = (
+                    response.get("message", {}).get("content", "")
+                    or response.get("content", "")
+                )
             else:
                 content = str(response)
 
             return content.strip() if content else "Generic intent for now"
 
         except Exception as e:
-            self.logger.error(f"Error al interpretar intención del usuario: {str(e)}")
+            self.logger.error(
+                f"Error al interpretar intención del usuario: {str(e)}"
+            )
             return "Generic intent for now"
+
 
     def _observe_result(self, result: Any) -> Dict[str, Any]:
         """OBSERVE: Observa y normaliza el resultado de una herramienta (§12)."""
@@ -489,12 +566,12 @@ class Orchestrator:
             return Message(role="assistant", content=f"Tarea no completada (error). {str(e)}")
 
     async def _generate_response(self, state: SessionState, stream_callback: Optional[Callable[[str, bool], None]] = None) -> Message:
+
         """Genera la respuesta final al usuario usando el LLM cuando está disponible.
         
         Si se proporciona stream_callback, utiliza streaming para enviar los chunks de texto.
         De lo contrario, usa el comportamiento estándar (no streaming).
         """
-        import asyncio
         if not (self.llm_client and state.current_task):
             return Message(
                 role="assistant",
@@ -548,7 +625,8 @@ class Orchestrator:
                 )
 
             # Camino estándar (no streaming) para compatibilidad hacia atrás
-            raw_response = self.llm_client.chat(
+            # Camino estándar (no streaming)
+            response = await self.llm_client.chat(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -556,20 +634,15 @@ class Orchestrator:
                 temperature=0.1,
                 max_tokens=512
             )
-
-            # Soporte para mocks sincrónicos (dict) y asíncronos (corutinas)
-            if asyncio.iscoroutine(raw_response):
-                response = await raw_response
-            else:
-                response = raw_response
-
             if isinstance(response, dict):
                 content = response.get("message", {}).get("content", "") or response.get("content", "")
             else:
                 content = str(response)
 
-            return Message(role="assistant", content=content.strip() if content else "Tarea completada.")
-
+            return Message(
+                role="assistant",
+                content=content.strip() if content else "Tarea completada."
+            )
         except Exception as e:
             self.logger.error(f"Error al generar respuesta final con LLM: {str(e)}")
             # Fallback en caso de error incluso con streaming
@@ -577,3 +650,31 @@ class Orchestrator:
                 role="assistant",
                 content=f"Tarea completada (error). Iteraciones: {self.metrics.iterations_count}"
             )
+
+    def _generate_direct_response(self, state: SessionState) -> Message:
+        """Devuelve directamente el resultado de una herramienta sin llamar al LLM."""
+
+        results_cache = getattr(state, 'results_cache', {})
+
+        if not results_cache:
+            return Message(
+                role="assistant",
+                content="La herramienta se ejecutó correctamente, pero no devolvió resultados."
+            )
+
+        # Tomamos el último resultado registrado
+        _, result = next(reversed(results_cache.items()))
+
+        # Resultado normalizado por _observe_result()
+        if isinstance(result, dict):
+            if result.get("status") == "success":
+                content = result.get("result", "")
+            else:
+                content = result.get("error", str(result))
+        else:
+            content = str(result)
+
+        return Message(
+            role="assistant",
+            content=content.strip() if content else "La herramienta se ejecutó correctamente."
+        )
