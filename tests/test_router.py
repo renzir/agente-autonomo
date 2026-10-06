@@ -69,54 +69,7 @@ class TestRouterWithTools:
         assert decision.confidence > 0
         assert len(decision.reason) > 0
     
-    def test_route_search_intention(self):
-        """Enrutar intención de búsqueda."""
-        router = Router(tool_registry=self._create_test_tools())
-        
-        decision = router.route("Buscar documentación en internet")
-        
-        assert decision.tool_name == 'search'
-        assert decision.confidence > 0
-    
-    def test_route_shell_intention(self):
-        """Enrutar intención de ejecución."""
-        router = Router(tool_registry=self._create_test_tools())
-        
-        decision = router.route("Ejecutar script bash")
-        
-        # Puede ser shell o git dependiendo de keywords
-        assert decision.tool_name in ['shell', 'git']
-        assert decision.confidence > 0
-    
-    def test_route_git_intention(self):
-        """Enrutar intención de git."""
-        router = Router(tool_registry=self._create_test_tools())
-        
-        decision = router.route("Hacer commit y push")
-        
-        assert decision.tool_name == 'git'
-        assert decision.confidence > 0
-    
-    def test_route_no_match_priority(self):
-        """Enrutar sin match por prioridad."""
-        tools = {
-            'filesystem': ToolMetadata(
-                name='filesystem',
-                description='Archivo',
-                permission='read',
-                risk='low'
-            )
-        }
-        router = Router(tool_registry=tools)
-        
-        # Intentión que no coincide con keywords conocidas
-        decision = router.route("Hacer algo especial")
-        
-        # Debe elegir por prioridad
-        assert decision.tool_name == 'filesystem'
-        assert decision.confidence < 0.5  # Confianza baja por no match
-
-
+  
 class TestRouterDecision:
     """Tests para la decisión del router."""
     

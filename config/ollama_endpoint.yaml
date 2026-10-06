@@ -1,0 +1,2 @@
+# Configuración del endpoint de Ollama
+endpoint: "http://192.168.1.143:11434"

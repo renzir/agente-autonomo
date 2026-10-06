@@ -10,6 +10,7 @@ import yaml
 from pathlib import Path
 from typing import Any, Optional
 from pydantic import BaseModel, Field
+from enum import Enum
 
 
 # ======================================================================
@@ -38,11 +39,10 @@ class ToolResult(BaseModel):
     error: Optional[str] = None
 
 
+
+
 class ToolMetadata(BaseModel):
-    """Metadatos descriptivos para cada herramienta disponible.
-    
-    Correspondiente a la sección de herramientas (tools/).
-    """
+    """Metadatos descriptivos para cada herramienta disponible."""
     name: str
     description: str
     input_schema: dict[str, Any] = Field(default_factory=dict)
@@ -52,6 +52,39 @@ class ToolMetadata(BaseModel):
     cost: float = 0.0  # costo estimado en tokens
     requires_confirmation: bool = False
 
+
+# ======================================================================
+# Esquemas adicionales para Planner (agregados para corregir ImportError)
+# ======================================================================
+
+class Step(BaseModel):
+    """Representa un paso en el plan de ejecución."""
+    id: int = Field(default=0)
+    description: str = ""
+    depends_on: list[int] = Field(default_factory=list)
+    tool: str = ""  # Nombre de la herramienta
+    args: dict[str, Any] = Field(default_factory=dict)
+    expected_output: str = ""
+
+class PlannerRequest(BaseModel):
+    """Solicitud al planner."""
+    task: str
+    context: Optional[str] = None
+    system_prompt: Optional[str] = None
+    user_prompt: Optional[str] = None
+    temperature: float = 0.2
+    max_tokens: int = 2048
+
+class PlannerResponse(BaseModel):
+    """Respuesta del planner con la lista de pasos."""
+    steps: list[Step] = Field(default_factory=list)
+    estimated_tokens: int = 0
+    max_iterations: int = 0
+
+
+class InteractionMode(str, Enum):
+    CONVERSATIONAL = "conversational"  # Modo /chat
+    AUTONOMOUS = "autonomous"          # Modo /agente (predeterminado)
 
 # ======================================================================
 # Configuración del agente (sección config/agent.yaml)

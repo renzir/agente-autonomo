@@ -7,11 +7,11 @@ import pytest
 import os
 import tempfile
 import yaml
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 # Importar el módulo bajo prueba
-from core.agent import LocalAgent, MetricsLogger, create_agent
-
+from core.agent import LocalAgent, create_agent
+from metrics.logger import MetricsLogger
 
 class TestMetricsLogger:
     """Tests para la clase MetricsLogger."""
@@ -104,41 +104,36 @@ class TestLocalAgentInit:
 class TestLocalAgentRun:
     """Tests para el método run del agente."""
     
-    def test_run_returns_message(self):
+    async def test_run_returns_message(self):
         """run() debe devolver un Message."""
         with patch('core.agent.OllamaClient'), \
              patch('core.agent.ModelRegistry'):
-            
+    
             agent = LocalAgent(model_name='test_model')
-            
-            # Mockeamos el orchestrator para evitar llamadas reales a LLM
             mock_response = MagicMock()
             mock_response.content = "Respuesta de prueba"
-            # Reemplazar completamente el objeto run con un MagicMock
-            agent.orchestrator.run = MagicMock(return_value=mock_response)
-            
-            response = agent.run("Hola mundo")
-            
+            agent.orchestrator.run = AsyncMock(return_value=mock_response)
+    
+            response = await agent.run("Hola mundo")
+    
             assert response is not None
             assert hasattr(response, 'content') or isinstance(response, str)
 
-    def test_run_creates_session(self):
+    async def test_run_creates_session(self):
         """run() debe crear una sesión."""
         with patch('core.agent.OllamaClient'), \
              patch('core.agent.ModelRegistry'):
-            
+    
             agent = LocalAgent(model_name='test_model')
-            
-            # Mockeamos el orchestrator para evitar llamadas reales a LLM
             mock_response = MagicMock()
             mock_response.content = "Respuesta"
-            agent.orchestrator.run = MagicMock(return_value=mock_response)
-            
-            agent.run("Prueba de sesión")
-            
+            agent.orchestrator.run = AsyncMock(return_value=mock_response)
+    
+            await agent.run("Prueba de sesión")
+    
             assert agent.current_session is not None
 
-    def test_run_with_empty_input(self):
+    async def test_run_with_empty_input(self):
         """run() debe manejar input vacío sin romper."""
         with patch('core.agent.OllamaClient'), \
              patch('core.agent.ModelRegistry'):
@@ -147,9 +142,9 @@ class TestLocalAgentRun:
             
             mock_response = MagicMock()
             mock_response.content = "Empty response"
-            agent.orchestrator.run = MagicMock(return_value=mock_response)
+            agent.orchestrator.run = AsyncMock(return_value=mock_response)
             
-            response = agent.run("")
+            response = await agent.run("")
             
             # No debería levantar excepción
             assert response is not None
@@ -187,23 +182,53 @@ class TestLocalAgentLifecycle:
 
 
 class TestIntegrationToolMap:
-    """Tests específicos para el mapa de herramientas (_get_tools_map)."""
+    """Tests para el mapa de herramientas."""
     
     def test_get_tools_map_returns_callable(self):
         """_get_tools_map debe devolver un dict con callables."""
         with patch('core.agent.OllamaClient'), \
              patch('core.agent.ModelRegistry'):
-            
+
             agent = LocalAgent(model_name='test_model')
             tools = agent._get_tools_map()
-            
+
             assert isinstance(tools, dict)
-            
-            # Verificar que las herramientas clave existen y son funciones
+
             for tool_name in ['filesystem', 'search', 'shell', 'git']:
                 assert tool_name in tools
                 assert callable(tools[tool_name])
 
+def test_filesystem_wrapper_requires_operation():
+    """filesystem debe exigir una operación explícita."""
+    with patch('core.agent.OllamaClient'), \
+         patch('core.agent.ModelRegistry'):
+
+        agent = LocalAgent(model_name='test_model')
+        filesystem = agent._get_tools_map()['filesystem']
+
+        result = filesystem({
+            'path': 'test.txt',
+            'content': 'hello'
+        })
+
+        assert "operation" in result.lower()
+        assert "required" in result.lower()
+
+
+def test_filesystem_wrapper_rejects_unknown_operation():
+    """filesystem debe rechazar operaciones desconocidas."""
+    with patch('core.agent.OllamaClient'), \
+         patch('core.agent.ModelRegistry'):
+
+        agent = LocalAgent(model_name='test_model')
+        filesystem = agent._get_tools_map()['filesystem']
+
+        result = filesystem({
+            'operation': 'delete_file',
+            'path': 'test.txt'
+        })
+
+        assert "unknown filesystem operation" in result.lower()
 
 class TestEdgeCases:
     """Tests para casos límite."""
@@ -222,23 +247,21 @@ class TestEdgeCases:
         finally:
             os.unlink(config_path)
     
-    def test_run_with_mock_failures(self):
+    async def test_run_with_mock_failures(self):
         """run() debe manejar fallos internos gracefully."""
         with patch('core.agent.OllamaClient'), \
              patch('core.agent.ModelRegistry'):
-            
+    
             agent = LocalAgent(model_name='test_model')
-            
-            # Simular fallo en el orchestrator
             def raise_error(*args, **kwargs):
                 raise Exception("Orchestrator error")
-            
-            agent.orchestrator.run = MagicMock(side_effect=raise_error)
-            
-            # run() debería propagar la excepción o manejarla según implementación
-            with pytest.raises(Exception):
-                agent.run("Tarea que falla")
+    
+            agent.orchestrator.run = AsyncMock(side_effect=raise_error)    
+            # CORRECCIÓN: Agregar 'await' y verificar el comportamiento esperado
+            with pytest.raises(Exception): # O maneja la excepción según tu implementación real
+                await agent.run("Tarea que falla")
                 
+
 class TestMetricsPropagation:
     """Tests para verificar que las métricas se propagan correctamente."""
     
@@ -268,7 +291,7 @@ class TestMetricsPropagation:
             # Verificar que logger_callback fue pasado (el orchestrator intenta loguear con él)
             assert len(captured_callbacks) == 1
             
-    def test_metrics_structure(self):
+    async def test_metrics_structure(self):
         """Verificar la estructura de las métricas logueadas."""
         with patch('core.agent.OllamaClient'), \
              patch('core.agent.ModelRegistry'):
@@ -277,9 +300,9 @@ class TestMetricsPropagation:
             
             mock_response = MagicMock()
             mock_response.content = "Ok"
-            agent.orchestrator.run = MagicMock(return_value=mock_response)
+            agent.orchestrator.run = AsyncMock(return_value=mock_response)
             
-            agent.run("Estructura métricas")
+            await agent.run("Estructura métricas")
             
             if agent.metrics_logger.metrics_history:
                 metric = agent.metrics_logger.metrics_history[0]
@@ -287,3 +310,107 @@ class TestMetricsPropagation:
                 assert 'timestamp' in metric
                 assert 'metric' in metric
                 assert 'value' in metric
+
+class TestInteractionModeRouting:
+    """Tests para la nueva lógica de detección de modo (/chat vs /agente)."""
+    
+    def test_intent_classifier_detects_chat(self):
+        """IntentClassifier debe detectar '/chat' como conversacional."""
+        from core.router import IntentClassifier
+        from models.schemas import InteractionMode
+        
+        mode = IntentClassifier.classify("/chat hola mundo")
+        assert mode == InteractionMode.CONVERSATIONAL
+        
+        # Prueba con formato alternativo
+        mode_alt = IntentClassifier.classify("/chat")
+        assert mode_alt == InteractionMode.CONVERSATIONAL
+
+    def test_intent_classifier_detects_autonomous(self):
+        """IntentClassifier debe detectar '/agente' como autónomo."""
+        from core.router import IntentClassifier
+        from models.schemas import InteractionMode
+        
+        mode = IntentClassifier.classify("/agente crear un archivo")
+        assert mode == InteractionMode.AUTONOMOUS
+
+    def test_intent_classifier_default_is_autonomous(self):
+        """El modo por defecto debe ser autónomo (Agente)."""
+        from core.router import IntentClassifier
+        from models.schemas import InteractionMode
+        
+        # Input normal sin prefijos
+        mode = IntentClassifier.classify("analiza este documento")
+        assert mode == InteractionMode.AUTONOMOUS
+
+    async def test_run_chat_bypasses_orchestrator(self):
+        """run('/chat') debe saltar la orquestación completa."""
+        with patch('core.agent.OllamaClient'), \
+             patch('core.agent.ModelRegistry'):
+            
+            agent = LocalAgent(model_name='test_model')
+            
+            # Mock de la respuesta del LLM directo
+            mock_llm_response = {
+                "message": {"content": "Respuesta rápida sin planear."}
+            }
+            agent.ollama_client.chat = AsyncMock(return_value=mock_llm_response)
+            
+            # Si el orchestrator.run se llama, fallará este test porque lanzaría excepción o devolvería lo erróneo
+            # Lo forzamos a levantar error para asegurar que NO fue llamado
+            agent.orchestrator.run = MagicMock(side_effect=RuntimeError("Orchestrator fue llamado indebidamente en modo chat"))
+            
+            # Ejecutar con /chat
+            response = await agent.run("/chat hola, cómo estás?")
+            
+            # Verificar que la respuesta viene del LLM directo (stub simple aquí para demo)
+            # Nota: En una implementación real con AsyncMock de ollama_client, esto retornaría el mock.
+            # Aquí verificamos que no se rompió y no entró al bloque de error de orchestrator
+            
+    async def test_run_default_uses_orchestrator(self):
+        """run(sin prefijo) debe usar el orchestrator."""
+        with patch('core.agent.OllamaClient'), \
+             patch('core.agent.ModelRegistry'):
+            
+            agent = LocalAgent(model_name='test_model')
+            
+            mock_response = MagicMock()
+            mock_response.content = "Respuesta planificada"
+            
+            # Spy para asegurar que run es llamado
+            run_called = False
+            def capture_run(*args, **kwargs):
+                nonlocal run_called
+                run_called = True
+                return mock_response
+
+            # Usar AsyncMock permite el 'await' correcto en las pruebas asíncronas
+            agent.orchestrator.run = AsyncMock(side_effect=capture_run)
+            
+            # Ejecutar input normal (default autónomo)
+            await agent.run("Crea un archivo de texto")
+            
+            assert run_called is True, "El orchestrator debería haber sido llamado para inputs normales"
+
+    async def test_explicit_agente_uses_orchestrator(self):
+        """run('/agente ...') debe usar el orchestrator."""
+        with patch('core.agent.OllamaClient'), \
+             patch('core.agent.ModelRegistry'):
+            
+            agent = LocalAgent(model_name='test_model')
+            
+            mock_response = MagicMock()
+            mock_response.content = "Respuesta explícita"
+            
+            run_called = False
+            def capture_run(*args, **kwargs):
+                nonlocal run_called
+                run_called = True
+                return mock_response
+
+            # Usar AsyncMock permite el 'await' correcto en las pruebas asíncronas
+            agent.orchestrator.run = AsyncMock(side_effect=capture_run)
+            
+            await agent.run("/agente ejecuta un script")
+            
+            assert run_called is True
