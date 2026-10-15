@@ -16,11 +16,11 @@ from httpx import Timeout
 # ================================================================
 
 def _models_yaml_path() -> Path:
-    return Path(__file__).parent.parent / "config" / "models.yaml"
+    return Path(__file__).parent.parent.parent / "config" / "models.yaml"
 
 
 def _agent_yaml_path() -> Path:
-    return Path(__file__).parent.parent / "config" / "agent.yaml"
+    return Path(__file__).parent.parent.parent / "config" / "agent.yaml"
 
 
 # ================================================================
@@ -46,9 +46,10 @@ class TestModelRegistry:
         from models.model_registry import ModelRegistry
 
         registry = ModelRegistry(str(_models_yaml_path()))
-        assert registry.get_model_config("primary") == "qwen3.6:latest"
-        assert registry.get_model_config("coding") == "qwen3.6:latest"
-        assert registry.get_model_config("fast") == "gemma4-122k:latest"
+        # Valores corregidos para coincidir con config/models.yaml real
+        assert registry.get_model_config("primary") == "qwen3.6-64k:latest"
+        assert registry.get_model_config("coding") == "qwen3.6-64k:latest"
+        assert registry.get_model_config("fast") == "qwen3.6-64k:latest"
         assert registry.get_model_config("research") == "ornith15-iq4xs:latest"
 
     def test_registry_get_model_config_unknown(self) -> None:
@@ -74,9 +75,10 @@ class TestModelRegistry:
 
         registry = ModelRegistry(str(_models_yaml_path()))
 
-        assert registry.select_model("primary") == "qwen3.6:latest"
-        assert registry.select_model("coding") == "qwen3.6:latest"
-        assert registry.select_model("fast") == "gemma4-122k:latest"
+        # Valores corregidos para coincidir con config/models.yaml real
+        assert registry.select_model("primary") == "qwen3.6-64k:latest"
+        assert registry.select_model("coding") == "qwen3.6-64k:latest"
+        assert registry.select_model("fast") == "qwen3.6-64k:latest"
         assert registry.select_model("research") == "ornith15-iq4xs:latest"
 
     def test_registry_select_default(self) -> None:
@@ -84,7 +86,7 @@ class TestModelRegistry:
 
         registry = ModelRegistry(str(_models_yaml_path()))
         # Sin tipo — debe usar defaults.model que es 'primary'
-        assert registry.select_model(None) == "qwen3.6:latest"
+        assert registry.select_model(None) == "qwen3.6-64k:latest"
 
     def test_registry_raw_access(self) -> None:
         from models.model_registry import ModelRegistry
@@ -107,11 +109,13 @@ class TestOllamaClientInstantiation:
         from models.ollama_client import OllamaClient
 
         client = OllamaClient()
-        # Debe resolver a localhost por defecto si no hay config dedicada
-        assert ('localhost' in client._resolved_url or 
-                '127.' in client._resolved_url or
-                '100.64.' in client._resolved_url or
-                '::1' in client._resolved_url)
+        # Aceptar cualquier URL local válida (localhost, loopback, o IP de red local privada)
+        url = client._resolved_url
+        assert 'localhost' in url or \
+               '127.' in url or \
+               '::1' in url or \
+               re.search(r'^http://(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})', url)
+
     def test_custom_endpoint(self) -> None:
         from models.ollama_client import OllamaClient
 
@@ -157,14 +161,16 @@ class TestGetDefaultClient:
     """Prueba de la función lazy get_default_client."""
 
     def test_returns_same_instance(self) -> None:
-        from models.ollama_client import get_default_client, DEFAULT_CLIENT
-
+        from models.ollama_client import get_default_client
+        
         # La primera llamada crea el cliente
         client_a = get_default_client()
         assert client_a is not None
 
-        # Si ya estaba creado, debería devolver la misma instancia (comportamiento lazy singleton)
-        # Nota: Esto puede depender de si se resetea o no en tests. Por robustez, verificamos que es del tipo correcto.
+        # Verificar que la segunda llamada devuelve la MISMA instancia (singleton lazy)
+        client_b = get_default_client()
+        assert client_b is client_a, "get_default_client() debe devolver la misma instancia (singleton)"
+        
         from models.ollama_client import OllamaClient
         assert isinstance(client_a, OllamaClient)
 
@@ -178,4 +184,46 @@ class TestOllamaClientMethodsExist:
 
         client = OllamaClient()
         assert hasattr(client, "chat")
-        sig = inspect
+        sig = inspect.signature(client.chat)
+        
+        # Verificar parámetros esperados del método chat
+        params = list(sig.parameters.keys())
+        assert 'messages' in params
+        assert 'model' in params
+        assert 'tools' in params
+        assert 'stream' in params
+        
+        # Verificar que es asíncrono (coroutine)
+        import asyncio
+        assert asyncio.iscoroutinefunction(client.chat)
+
+    def test_chat_stream_method_exists(self) -> None:
+        from models.ollama_client import OllamaClient
+        import inspect
+        import asyncio
+
+        client = OllamaClient()
+        assert hasattr(client, "chat_stream")
+        
+        # Verificar que es un generador asíncrono
+        assert asyncio.iscoroutinefunction(client.chat_stream) or callable(client.chat_stream)
+
+    def test_list_models_method_exists(self) -> None:
+        from models.ollama_client import OllamaClient
+        import inspect
+        import asyncio
+
+        client = OllamaClient()
+        assert hasattr(client, "list_models")
+        
+        # Verificar que es asíncrono
+        assert asyncio.iscoroutinefunction(client.list_models)
+
+    def test_resolve_endpoint_static_method_exists(self) -> None:
+        from models.ollama_client import OllamaClient
+        import inspect
+
+        assert hasattr(OllamaClient, "resolve_endpoint")
+        
+        # Debe ser un método estático
+        assert isinstance(inspect.getattr_static(OllamaClient, "resolve_endpoint"), staticmethod)

@@ -83,8 +83,12 @@ class PlannerResponse(BaseModel):
 
 
 class InteractionMode(str, Enum):
-    CONVERSATIONAL = "conversational"  # Modo /chat
-    AUTONOMOUS = "autonomous"          # Modo /agente (predeterminado)
+
+    CONVERSATIONAL = "conversational"  # Modo normal / chat
+    AUTONOMOUS = "autonomous"          # /agente
+    ANALYSIS = "analysis"              # /analiza
+    REFACTOR = "refactor"              # /refactor
+    CODING = "coding"                  # /codigo
 
 # ======================================================================
 # Configuración del agente (sección config/agent.yaml)
@@ -97,7 +101,7 @@ class AgentConfig(BaseModel):
     """
     max_iterations: int = Field(default=12, ge=1)
     max_tool_calls: int = Field(default=30, ge=1)
-    max_execution_time: float = Field(default=300.0, gt=0)  # segundos
+    max_execution_time: float = Field(default=900.0, gt=0)  # segundos
 
     class ContextConfig(BaseModel):
         hard_limit: int = Field(default=32768, gt=0)

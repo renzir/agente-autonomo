@@ -8,15 +8,7 @@ import re
 import logging
 from typing import Tuple, Callable, Dict, List, Optional, Any
 from pydantic import BaseModel, Field
-
-# Importamos el modo de interacción directo si está disponible, sino fallback
-try:
-    from models.schemas import InteractionMode, ToolMetadata
-except ImportError:
-    # Fallback para compatibilidad en tests o entornos sin imports completos
-    class InteractionMode:
-        CONVERSATIONAL = "conversational"
-        AUTONOMOUS = "autonomous"
+from models.schemas import InteractionMode, ToolMetadata
 
 class IntentClassifier:
     """

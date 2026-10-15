@@ -12,7 +12,7 @@ from safety.policy import Policy
 from tools.filesystem import read_file_tool, list_files_tool, create_file_tool, modify_file_tool
 from tools.search import search_text_tool
 from tools.shell import execute_command_tool
-
+from tools.filesystem import project_tree_tool
 
 class ToolRegistry:
     """Catálogo central de herramientas con validación de inputs y metadata."""
@@ -115,6 +115,41 @@ class ToolRegistry:
                 "fn": search_text_tool
             },
             {
+                "name": "project_tree",
+                "description": (
+                    "Muestra el árbol recursivo de archivos y directorios de un proyecto "
+                    "sin leer el contenido de los archivos. Excluye directorios ocultos "
+                    "y carpetas de dependencias o caché."
+                ),
+                "permission": "read",
+                "risk": "low",
+                "timeout": 10,
+                "cost": 1,
+                "requires_confirmation": False,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Ruta del directorio del proyecto",
+                            "default": "."
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "description": "Profundidad máxima del árbol",
+                            "default": 5
+                        },
+                        "max_entries": {
+                            "type": "integer",
+                            "description": "Número máximo de entradas",
+                            "default": 500
+                        }
+                    },
+                    "required": []
+                },
+                "fn": project_tree_tool
+            },
+            {
                 "name": "execute_command",
                 "description": "Execute a shell command in the sandbox environment.",
                 "permission": "execute",
@@ -160,57 +195,73 @@ class ToolRegistry:
             "fn": self._functions[name]
         }
 
+
     def validate_input(self, tool_name: str, args: dict) -> bool:
         """Valida los argumentos de entrada contra el schema de la herramienta. §9"""
         if tool_name not in self._tools:
             raise KeyError(f"Tool '{tool_name}' not found.")
-        
+
         schema = self._tools[tool_name].input_schema
         if not schema:
-            return True # Sin schema definido, se asume válido
+            return True
+
+        if not isinstance(args, dict):
+            raise ValueError("Los argumentos deben ser un diccionario.")
 
         try:
-            # Usamos Pydantic para validar contra el schema JSON
-            # Creamos un modelo temporal basado en el schema (simplificado para MVP)
-            from pydantic import create_model, BaseModel
-            
-            # Extracción básica de tipos del schema json simple
-            fields = {}
-            for prop_name, prop_def in schema.get("properties", {}).items():
-                p_type = prop_def.get("type", "string")
-                # Mapeo simple de tipos JSON a Python
-                if p_type == "string":
-                    fields[prop_name] = (str, ...)
-                elif p_type == "number":
-                    fields[prop_name] = (float, ...)
-                elif p_type == "integer":
-                    fields[prop_name] = (int, ...)
-                elif p_type == "boolean":
-                    fields[prop_name] = (bool, ...)
-                else:
-                    fields[prop_name] = (str, ...)
+            from pydantic import create_model, ValidationError
+            from typing import Any, Optional
 
+            properties = schema.get("properties", {})
             required = schema.get("required", [])
-            
-            # Crear clase dinámica
-            TempModel = create_model(f'Temp{tool_name.capitalize()}Model', **fields)
-            
-            # Instanciar con los args recibidos
-            instance = TempModel(**args)
-            
-            # Verificar que existan todos los requeridos en el objeto instanciado (si no tienen default)
-            for req in required:
-                if req not in args:
-                    raise ValueError(f"Missing required argument: {req}")
+            fields = {}
 
+            type_mapping = {
+                "string": str,
+                "number": float,
+                "integer": int,
+                "boolean": bool,
+                "object": dict,
+                "array": list,
+            }
+
+            for prop_name, prop_def in properties.items():
+                prop_type = type_mapping.get(
+                    prop_def.get("type", "string"),
+                    Any
+                )
+
+                if prop_name in required:
+                    fields[prop_name] = (prop_type, ...)
+                elif "default" in prop_def:
+                    fields[prop_name] = (
+                        Optional[prop_type],
+                        prop_def["default"]
+                    )
+                else:
+                    fields[prop_name] = (
+                        Optional[prop_type],
+                        None
+                    )
+
+            TempModel = create_model(
+                f"Temp{tool_name.title().replace('_', '')}Model",
+                **fields
+            )
+
+            # Rechazar argumentos que no estén definidos en el esquema.
+            unknown_args = set(args) - set(properties)
+            if unknown_args:
+                raise ValueError(
+                    f"Argumentos desconocidos para '{tool_name}': "
+                    f"{', '.join(sorted(unknown_args))}"
+                )
+
+            TempModel(**args)
             return True
 
         except ValidationError as e:
-            raise ValueError(f"Input validation failed for '{tool_name}': {e}")
-        except Exception as e:
-            # Fallback: si el schema es complejo, solo verificamos keys básicas para MVP
-            if "required" in schema:
-                for req in schema["required"]:
-                    if req not in args:
-                        raise ValueError(f"Missing required argument: {req}")
-            return True
+            raise ValueError(
+                f"Input validation failed for '{tool_name}': {e}"
+            ) from e
+

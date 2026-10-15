@@ -42,3 +42,4 @@ dmypy.json
 .env.*.local
 
 AGENT_SPEC_V2.md
+metrics/run.jsonl

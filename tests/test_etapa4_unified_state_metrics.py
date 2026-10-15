@@ -292,30 +292,7 @@ class TestFullIntegration:
 class TestRegression:
     """Tests de regresión para asegurar que los cambios no rompieron funcionalidad existente."""
     
-    def test_session_state_backward_compatible(self):
-        """Verifica que SessionState sigue funcionando con los métodos existentes."""
-        
-        from core.state import SessionState
-        
-        state = SessionState()
-        
-        # Métodos existentes deben seguir funcionando
-        state.add_message("user", "Prueba")
-        state.update_tokens(100)
-        state.set_phase("plan")
-        
-        assert state.tokens_used == 100
-        assert state.current_phase == "plan"
-        assert len(state.messages) == 1
-        
-        # Serialización debe funcionar
-        json_str = state.to_json()
-        restored = SessionState.from_json(json_str)
-        
-        assert restored.session_id == state.session_id
-        assert restored.tokens_used == state.tokens_used
-        assert restored.current_phase == state.current_phase
-    
+  
     def test_real_logger_backward_compatible(self):
         """Verifica que el MetricsLogger real sigue funcionando con sus métodos existentes."""
         

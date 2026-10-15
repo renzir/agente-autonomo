@@ -5,12 +5,14 @@ Define reglas estáticas de permisos y allowlists.
 
 from typing import Dict, List
 
+
 # Comandos permitidos por defecto (Allowlist) §10
 ALLOWED_COMMANDS: List[str] = [
-    "ls", "cat", "echo", "pwd", "git", "python", 
+    "ls", "cat", "echo", "pwd", "git", 
     "mkdir", "cp", "mv", "head", "tail", "grep",
     "wc", "sort", "uniq", "find", "date", "whoami", "touch", "ping"
 ]
+
 
 # Comandos bloqueados por defecto (Danger List) §10
 BLOCKED_COMMANDS_PATTERNS: List[str] = [

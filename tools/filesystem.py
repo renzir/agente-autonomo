@@ -35,6 +35,8 @@ def read_file_tool(args: dict, permission: str = "read", risk_level: str = "low"
     if not sbx.validate_path(path_str):
         return f"Security Error: Path '{path_str}' is outside allowed directories."
 
+    print(f"[TRACE] CWD: {Path.cwd()}")
+    print(f"[TRACE] PATH RECEIVED: {path_str}")
     full_path = Path(path_str).resolve()
     
     try:
@@ -43,11 +45,6 @@ def read_file_tool(args: dict, permission: str = "read", risk_level: str = "low"
         
         with open(full_path, 'r', encoding='utf-8') as f:
             content = f.read()
-        
-        # Truncar si es muy grande para el contexto del MVP
-        max_len = 4000
-        if len(content) > max_len:
-            return content[:max_len] + "\n\n... [Content truncated for context limits]"
         
         return content
 
@@ -122,6 +119,7 @@ def create_file_tool(args: dict, permission: str = "write", risk_level: str = "m
 
 
 def modify_file_tool(args: dict, permission: str = "write", risk_level: str = "medium") -> str:
+
     """Modifica/Reemplaza el contenido de un archivo. Valida sandbox antes de escribir. §10"""
     path_str = args.get("path")
     content = args.get("content", "")
@@ -150,3 +148,117 @@ def modify_file_tool(args: dict, permission: str = "write", risk_level: str = "m
         return f"Error: Permission denied to modify {full_path}"
     except Exception as e:
         return f"Error modifying file: {str(e)}"
+
+
+
+def project_tree_tool(
+    args: dict,
+    permission: str = "read",
+    risk_level: str = "low"
+) -> str:
+    """Devuelve el árbol de un proyecto sin leer el contenido de sus archivos."""
+    path_str = args.get("path", ".")
+    try:
+        max_depth = max(1, min(int(args.get("max_depth", 5)), 10))
+        max_entries = max(10, min(int(args.get("max_entries", 500)), 2000))
+    except (ValueError, TypeError):
+        return "Error: max_depth y max_entries deben ser números enteros."
+
+    sbx = _get_sandbox()
+
+    if not sbx.validate_path(path_str):
+        return f"Security Error: Path '{path_str}' is outside allowed directories."
+
+    root = Path(path_str).resolve()
+
+    try:
+        if not root.exists():
+            return f"Error: Directory not found at {root}"
+        if not root.is_dir():
+            return f"Error: Path {root} is not a directory."
+
+        excluded_dirs = {
+            "node_modules", "__pycache__", ".pytest_cache",
+            ".mypy_cache", ".ruff_cache", ".tox", "venv",
+            ".venv", "dist", "build", ".next", ".astro"
+        }
+
+        def ignored(item: Path, is_directory: bool) -> bool:
+            # No seguir enlaces ni rutas que salgan del sandbox.
+            try:
+                resolved = item.resolve()
+                if not sbx.validate_path(str(resolved)):
+                    return True
+            except (OSError, RuntimeError):
+                return True
+
+            name = item.name.lower()
+
+            if is_directory:
+                # Ignora todas las carpetas ocultas, además de
+                # las carpetas generadas indicadas arriba.
+                return name.startswith(".") or name in excluded_dirs
+
+            # Evita mostrar archivos que puedan contener secretos.
+            return name == ".env" or name.startswith(".env.")
+
+        lines = [f"{root.name or str(root)}"]
+        count = 0
+        truncated = False
+
+        def walk(directory: Path, prefix: str, depth: int) -> None:
+            nonlocal count, truncated
+
+            if depth > max_depth or truncated:
+                return
+
+            try:
+                items = sorted(
+                    directory.iterdir(),
+                    key=lambda item: (
+                        not item.is_dir(),
+                        item.name.lower()
+                    )
+                )
+            except (PermissionError, OSError):
+                lines.append(f"{prefix}└── [No se pudo acceder]")
+                return
+
+            visible = []
+            for item in items:
+                try:
+                    is_directory = item.is_dir()
+                    if ignored(item, is_directory):
+                        continue
+                    visible.append((item, is_directory))
+                except OSError:
+                    continue
+
+            for index, (item, is_directory) in enumerate(visible):
+                if count >= max_entries:
+                    truncated = True
+                    lines.append(f"{prefix}└── ... [Límite de entradas alcanzado]")
+                    return
+
+                count += 1
+                last = index == len(visible) - 1
+                connector = "└── " if last else "├── "
+                suffix = "/" if is_directory else ""
+
+                lines.append(f"{prefix}{connector}{item.name}{suffix}")
+
+                if is_directory:
+                    next_prefix = prefix + ("    " if last else "│   ")
+                    if depth < max_depth:
+                        walk(item, next_prefix, depth + 1)
+
+                if truncated:
+                    return
+
+        walk(root, "", 1)
+        return "\n".join(lines)
+
+    except PermissionError:
+        return f"Error: Permission denied to list {root}"
+    except OSError as e:
+        return f"Error listing project tree: {e}"

@@ -1,12 +1,22 @@
-"""
-tests/test_router.py - Tests para core/router.py
-Verifica la decisión de enrutamiento de herramientas.
-"""
-
 import pytest
 from core.router import Router, RouterDecision
 from models.schemas import ToolMetadata
 
+
+class MockToolRegistry:
+    """Mock del registry para pruebas."""
+    
+    def __init__(self, tools_dict):
+        self.tools = tools_dict
+
+    def get_tool(self, name):
+        if name not in self.tools:
+            raise KeyError(f"Tool {name} not found")
+        return self.tools[name]
+    
+    def validate_input(self, tool_name, args):
+        # Mock vacío para validar entrada sin fallar
+        pass
 
 class TestRouter:
     """Tests básicos del router."""
@@ -15,12 +25,20 @@ class TestRouter:
         """Crear instancia del router."""
         router = Router()
         assert router is not None
-        assert len(router.priority_order) > 0
+        # El Router actual solo inicializa tool_registry, no priority_order
+        assert hasattr(router, 'tool_registry')
     
     def test_route_without_tools(self):
         """Enrutar sin herramientas disponibles (debe devolver decisión vacía)."""
         router = Router()
-        decision = router.route("Ejecutar comando")
+        
+        # Mock de un paso con atributo tool vacío o nulo
+        class MockStep:
+            id = "step1"
+            tool = ""
+            args = {}
+        
+        decision = router.route(MockStep())
         
         assert isinstance(decision, RouterDecision)
         assert decision.tool_name == ""
@@ -30,8 +48,8 @@ class TestRouter:
 class TestRouterWithTools:
     """Tests del router con herramientas disponibles."""
     
-    def _create_test_tools(self):
-        """Crea diccionario de herramientas de prueba."""
+    def _create_test_tools_metadata(self):
+        """Crea diccionario de herramientas de prueba (ToolMetadata)."""
         return {
             'filesystem': ToolMetadata(
                 name='filesystem',
@@ -61,12 +79,21 @@ class TestRouterWithTools:
     
     def test_route_filesystem_intention(self):
         """Enrutar intención de archivos."""
-        router = Router(tool_registry=self._create_test_tools())
+        # El router llama a self.tool_registry.get_tool(), así que tool_registry debe ser un objeto
+        mock_registry = MockToolRegistry(self._create_test_tools_metadata())
+        router = Router(tool_registry=mock_registry)
         
-        decision = router.route("Leer archivo de configuración")
+        # Simular un paso que ya sabe qué herramienta necesita (ej: desde el Planner)
+        class MockStep:
+            id = "step2"
+            tool = 'filesystem'
+            args = {}
+            
+        decision = router.route(MockStep())
         
+        # Dado que filesystem existe en el registry creado, debería devolver confianza alta
         assert decision.tool_name == 'filesystem'
-        assert decision.confidence > 0
+        assert decision.confidence == 1.0
         assert len(decision.reason) > 0
     
   
@@ -127,3 +154,15 @@ class TestEdgeCases:
     
     def test_empty_intention(self):
         """Enrutar intención vacía."""
+        router = Router()
+        
+        # Crear un mock para el step con tool vacío
+        class MockStep:
+            id = "step3"
+            tool = ""
+            args = {}
+            
+        decision = router.route(MockStep())
+        
+        assert decision.tool_name == ""
+        assert decision.confidence == 0.0

@@ -5,7 +5,7 @@ Verifica metadatos y validación de inputs.
 
 import unittest
 from tools.registry import ToolRegistry
-from safety.permissions import PermissionManager
+
 
 class TestToolRegistry(unittest.TestCase):
     def setUp(self):

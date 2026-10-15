@@ -54,6 +54,24 @@ class TestShellSecurity(unittest.TestCase):
         result = execute_command_tool({"command": "nc -l 8080"})
         self.assertIn("Security Error", result)
 
+    def test_python_c_blocked_by_policy(self):
+        """Python -c debe ser rechazado por la política de seguridad."""
+        from safety.policy import Policy
+        
+        # Verificar que la política rechaza comandos que inician con python
+        cmd = "python -c 'import os; print(1)'"
+        self.assertFalse(Policy.is_command_allowed(cmd), 
+                         f"El comando '{cmd}' debería ser rechazado por la política")
+
+    def test_python_c_blocked_by_execute_command_tool(self):
+        """La ejecución de python -c debe ser rechazada por execute_command_tool."""
+        result = execute_command_tool({"command": "python -c 'import os; print(1)'"})
+        
+        self.assertIn("Security Error", result, 
+                      f"execute_command_tool debería rechazar 'python -c'. Resultado: {result}")
+        self.assertIn("blocked by safety policy", result, 
+                      f"El mensaje de error debería indicar que está bloqueado por la política. Resultado: {result}")
+
 
 if __name__ == '__main__':
     unittest.main()

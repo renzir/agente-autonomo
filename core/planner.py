@@ -67,8 +67,8 @@ class Planner:
             response = await self._llm_plan(task, context)
             return response
         except Exception as e:
-            self.logger.error(f"Error al planificar con LLM: {str(e)}")
-            raise
+            self.logger.exception("Error al planificar con LLM; usando planificación por defecto")
+            return self._default_planning(task)
 
     async def _llm_plan(self, task: str, context: Optional[str] = None) -> PlannerResponse:
         """Genera un plan usando el cliente LLM. CORREGIDO PARA DEVOLVER JSON."""
@@ -85,6 +85,7 @@ class Planner:
             "- list_files\n"
             "- search_text\n"
             "- execute_command\n\n"
+            "- project_tree\n"
 
             "No inventes herramientas ni uses nombres alternativos como "
             "search, shell, write_file, file_manager o file_writer.\n\n"
@@ -111,13 +112,16 @@ class Planner:
             "3. Usa depends_on solo cuando un step dependa de otro.\n"
             "4. Devuelve SOLO JSON válido.\n"
             "5. Nunca inventes nombres de archivos, carpetas, rutas ni recursos que no aparezcan en la tarea o en resultados previos de herramientas.\n"
-            "6. Si una tarea requiere conocer primero el contenido de una carpeta o directorio desconocido, el primer step debe ser una herramienta de descubrimiento, normalmente list_files.\n"
-            "7. No generes steps posteriores basados en nombres de archivos, carpetas o recursos que todavía no conoces.\n"
-            "8. No uses nombres ficticios como archivo_ejemplo.conf, test.txt, config.yaml ni ningún otro nombre no proporcionado por el usuario o por una herramienta.\n"
-            "9. Usa exactamente los argumentos definidos para cada herramienta.\n"
-            "   search_text requiere el argumento 'pattern'. No uses 'query'.\n"
-            "10. Cuando el objetivo sea analizar archivos descubiertos dinámicamente, primero descubre los recursos disponibles y utiliza únicamente los nombres obtenidos de los resultados reales.\n"
-            "11. Si todavía no conoces los archivos necesarios para continuar, no los inventes."
+            "6. Si la tarea requiere descubrir primero archivos, rutas o recursos mediante list_files o search_text, el primer step debe ser únicamente la herramienta de descubrimiento.\n"
+            "7. No generes en el mismo plan un read_file u otro step que dependa del resultado de list_files o search_text. Ese resultado todavía no se conoce al crear el plan.\n"
+            "8. Después de ejecutar una herramienta de descubrimiento, el sistema volverá a planificar usando los resultados reales. Solo entonces puedes generar los steps que utilicen las rutas encontradas.\n"
+            "9. Nunca uses placeholders ni nombres inventados para representar resultados futuros, como 'archivo_identificado_en_paso_1', 'resultado_anterior', '<archivo_encontrado>' o similares.\n"            "   search_text requiere exactamente los argumentos 'pattern' y 'path'.\n"
+            "   No uses 'query' ni 'file'.\n"
+            "10. Cuando la tarea pida buscar dónde se define, aparece, usa o referencia una clase, función, variable, símbolo o texto concreto, utiliza search_text para localizarlo.\n"
+            "11. Si todavía no conoces los archivos necesarios para continuar, no los inventes.\n"
+            "12. Para buscar un patrón dentro de una carpeta, usa search_text con 'path' apuntando a esa carpeta.\n"
+            "    Para buscar dentro de un archivo concreto, usa también 'path' con la ruta del archivo.\n"
+            "    Nunca uses un argumento llamado 'file'.\n"
         )
         
         user_prompt = f"Tarea a realizar: {task}\nContexto disponible: {context or 'Ninguno'}"
@@ -170,8 +174,12 @@ class Planner:
             # Fallback seguro en lugar de romper
             return self._default_planning(task)
         except Exception as e:
-            self.logger.error(f"Error crítico en _llm_plan: {str(e)}")
-            raise   
+            self.logger.exception(
+                "Error crítico en _llm_plan: %s: %s",
+                type(e).__name__,
+                str(e),
+            )
+            raise  
 
     def _default_planning(self, task: str) -> PlannerResponse:
         """Planificación por defecto para tareas simples."""
